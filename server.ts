@@ -12,6 +12,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Readable } from 'stream';
 import fs from 'fs/promises';
 import crypto from 'crypto';
+import puppeteer from 'puppeteer';
 
 import { exec } from 'child_process';
 import util from 'util';
@@ -981,20 +982,218 @@ app.post('/api/trigger', async (req, res) => {
   }
 });
 
-// Trigger AI Analysis manually for testing
-app.post('/api/analyze', async (req, res) => {
-  try {
-    // Orqa fonda ishga tushirish uchun async chaqirib yuboramiz (kutib turmaslik uchun, chunki AI ko'p vaqt olishi mumkin)
-    analyzeJob().catch(err => console.error("[ANALYZE] Background error:", err.message));
-    res.json({ success: true, message: 'Tahlil boshlandi. Telegramni kuzating.' });
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
+function getCellValue(cell: any): any {
+  if (!cell) return '';
+  const val = cell.value;
+  if (val && typeof val === 'object') {
+    if ('result' in val) return val.result;
+    if ('sharedFormula' in val) return val.result;
   }
-});
+  return val === null || val === undefined ? '' : val;
+}
 
-// ── Har bir sinfni FAQAT o'z guruhiga rasmga olib yuboruvchi funksiya ──
-// Har sinf: TELEGRAM_CLASS_<sinf> o'zgaruvchisini o'qiydi.
-// ID kiritilmagan sinf o'tkazib yuboriladi (TELEGRAM_CHANNEL_3 ga yubormaydi).
+function generateSheetHtml(ws: any, sheetName: string): string {
+  const isGreen = sheetName.endsWith('g');
+  const isTib = sheetName.toLowerCase().includes('tib');
+  
+  let theme = {
+    primary: 'from-blue-600 to-indigo-800',
+    text: 'text-indigo-900',
+    bgLight: 'bg-indigo-50/50',
+    bgHeader: 'bg-indigo-100/80',
+    border: 'border-indigo-200',
+    accent: 'bg-amber-100 text-amber-900',
+    foizi: 'bg-amber-50 text-amber-950 font-bold',
+  };
+
+  if (isGreen) {
+    theme = {
+      primary: 'from-emerald-600 to-green-800',
+      text: 'text-green-900',
+      bgLight: 'bg-green-50/50',
+      bgHeader: 'bg-green-100/80',
+      border: 'border-green-200',
+      accent: 'bg-amber-100 text-amber-900',
+      foizi: 'bg-amber-50 text-amber-950 font-bold',
+    };
+  } else if (isTib) {
+    theme = {
+      primary: 'from-purple-600 to-fuchsia-800',
+      text: 'text-purple-900',
+      bgLight: 'bg-purple-50/50',
+      bgHeader: 'bg-purple-100/80',
+      border: 'border-purple-200',
+      accent: 'bg-amber-100 text-amber-900',
+      foizi: 'bg-amber-50 text-amber-950 font-bold',
+    };
+  }
+
+  const title = getCellValue(ws.getCell('A1')) || `${sheetName.toUpperCase()} haftalik imtihon`;
+
+  let studentHtmlRows = '';
+  let averageHtmlRow = '';
+
+  const rowCount = ws.rowCount;
+  for (let i = 4; i <= rowCount; i++) {
+    const row = ws.getRow(i);
+    let col1 = getCellValue(row.getCell(1));
+    
+    if (!col1) continue;
+
+    if (String(col1).includes("O'RTACHA")) {
+      const avgG = getCellValue(row.getCell(7)) || '0';
+      const avgK = getCellValue(row.getCell(11)) || '0';
+      const avgO = getCellValue(row.getCell(15)) || '0';
+      const avgS = getCellValue(row.getCell(19)) || '0';
+      const avgT = getCellValue(row.getCell(20)) || '0';
+      const avgV = getCellValue(row.getCell(22)) || '0';
+      
+      averageHtmlRow = `
+        <tr class="h-11 bg-amber-50/70 font-bold text-slate-900 border-t border-slate-300">
+          <td colspan="3" class="border-r border-slate-200 text-center font-bold italic py-2.5">O'RTACHA O'ZLASHTIRISH</td>
+          <td colspan="3" class="border-r border-slate-200"></td>
+          <td class="border-r border-slate-200 text-amber-800 bg-amber-50 font-extrabold text-[12px]">${avgG}%</td>
+          <td colspan="3" class="border-r border-slate-200"></td>
+          <td class="border-r border-slate-200 text-amber-800 bg-amber-50 font-extrabold text-[12px]">${avgK}%</td>
+          <td colspan="3" class="border-r border-slate-200"></td>
+          <td class="border-r border-slate-200 text-amber-800 bg-amber-50 font-extrabold text-[12px]">${avgO}%</td>
+          <td colspan="3" class="border-r border-slate-200"></td>
+          <td class="border-r border-slate-200 text-amber-800 bg-amber-50 font-extrabold text-[12px]">${avgS}%</td>
+          <td class="border-r border-slate-200 text-amber-800 bg-amber-50 font-extrabold text-[12px]">${avgT}%</td>
+          <td class="border-r border-slate-200"></td>
+          <td class="bg-amber-100 text-amber-950 font-black text-[13px]">${avgV}%</td>
+        </tr>
+      `;
+      break;
+    }
+
+    const num = col1;
+    const lastName = getCellValue(row.getCell(2)) || '';
+    const firstName = getCellValue(row.getCell(3)) || '';
+    const isAbsent = getCellValue(row.getCell(4)) === 'qatnashmadi';
+
+    if (isAbsent) {
+      studentHtmlRows += `
+        <tr class="h-9 hover:bg-slate-50/80 transition-colors">
+          <td class="border-r border-slate-200 py-2 text-slate-400 font-bold">${num}</td>
+          <td class="border-r border-slate-200 text-left px-4 font-bold text-slate-800">${lastName}</td>
+          <td class="border-r border-slate-200 text-left px-4 font-bold text-slate-800">${firstName}</td>
+          <td colspan="19" class="text-center font-bold text-slate-400 italic bg-slate-50/50 tracking-wider">qatnashmadi</td>
+        </tr>
+      `;
+    } else {
+      const scores = [];
+      for (let c = 4; c <= 22; c++) {
+        scores.push(getCellValue(row.getCell(c)) || '0');
+      }
+
+      studentHtmlRows += `
+        <tr class="h-9 hover:bg-slate-50/80 transition-colors">
+          <td class="border-r border-slate-200 py-2 text-slate-400 font-bold">${num}</td>
+          <td class="border-r border-slate-200 text-left px-4 font-bold text-slate-800">${lastName}</td>
+          <td class="border-r border-slate-200 text-left px-4 font-bold text-slate-800">${firstName}</td>
+          
+          <td class="border-r border-slate-200">${scores[0]}</td>
+          <td class="border-r border-slate-200">${scores[1]}</td>
+          <td class="border-r border-slate-200">${scores[2]}</td>
+          <td class="border-r border-slate-200 ${theme.foizi}">${scores[3]}%</td>
+          
+          <td class="border-r border-slate-200">${scores[4]}</td>
+          <td class="border-r border-slate-200">${scores[5]}</td>
+          <td class="border-r border-slate-200">${scores[6]}</td>
+          <td class="border-r border-slate-200 ${theme.foizi}">${scores[7]}%</td>
+          
+          <td class="border-r border-slate-200">${scores[8]}</td>
+          <td class="border-r border-slate-200">${scores[9]}</td>
+          <td class="border-r border-slate-200">${scores[10]}</td>
+          <td class="border-r border-slate-200 ${theme.foizi}">${scores[11]}%</td>
+          
+          <td class="border-r border-slate-200">${scores[12]}</td>
+          <td class="border-r border-slate-200">${scores[13]}</td>
+          <td class="border-r border-slate-200">${scores[14]}</td>
+          <td class="border-r border-slate-200 ${theme.foizi}">${scores[15]}%</td>
+          
+          <td class="border-r border-slate-200 ${theme.foizi}">${scores[16]}%</td>
+          <td class="border-r border-slate-200 text-red-600 font-bold">${scores[17]}</td>
+          <td class="bg-amber-50 text-amber-950 font-black">${scores[18]}%</td>
+        </tr>
+      `;
+    }
+  }
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <script src="https://cdn.tailwindcss.com"></script>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+      <style>
+        body { font-family: 'Outfit', sans-serif; }
+      </style>
+    </head>
+    <body class="bg-slate-900 p-6 flex justify-center items-center">
+      <div id="capture-target" class="w-[1250px] bg-white rounded-3xl overflow-hidden shadow-2xl border border-slate-200 p-6">
+        <div class="bg-gradient-to-r ${theme.primary} text-white text-center py-6 px-8 rounded-2xl mb-6 shadow-md">
+          <h1 class="text-3xl font-black tracking-wide uppercase">${title}</h1>
+          <p class="text-indigo-100 text-sm mt-1.5 font-semibold">Haftalik imtihon natijalari hisoboti</p>
+        </div>
+        <div class="overflow-hidden rounded-2xl border border-slate-200 shadow-sm bg-white">
+          <table class="w-full text-center border-collapse text-[11px] font-semibold text-slate-700">
+            <thead class="${theme.bgHeader} ${theme.text} font-bold text-[11px] uppercase tracking-wider">
+              <tr class="h-12 border-b border-slate-200 text-slate-900">
+                <th rowspan="2" class="border-r border-slate-200 w-10">№</th>
+                <th rowspan="2" class="border-r border-slate-200 w-44 text-left px-4">O'quvchining familiyasi</th>
+                <th rowspan="2" class="border-r border-slate-200 w-36 text-left px-4">O'quvchining ismi</th>
+                <th colspan="4" class="border-r border-slate-200 text-center py-2 bg-slate-50/60">Ona tili (50)</th>
+                <th colspan="4" class="border-r border-slate-200 text-center py-2 bg-slate-50/60">Matematika (50)</th>
+                <th colspan="4" class="border-r border-slate-200 text-center py-2 bg-slate-50/60">Ingliz tili (50)</th>
+                <th colspan="4" class="border-r border-slate-200 text-center py-2 bg-slate-50/60">Rus tili (50)</th>
+                <th rowspan="2" class="border-r border-slate-200 w-24">O'rtacha %</th>
+                <th rowspan="2" class="border-r border-slate-200 w-16">Jarima</th>
+                <th rowspan="2" class="w-20 bg-amber-100 text-amber-950 font-black text-[12px]">Umumiy %</th>
+              </tr>
+              <tr class="h-9 text-[10px] bg-slate-50/80 border-b border-slate-200 text-slate-700">
+                <th class="border-r border-slate-200">1-10</th><th class="border-r border-slate-200">11-20</th><th class="border-r border-slate-200">21-30</th><th class="border-r border-slate-200 bg-amber-50/80 font-bold">Foizi</th>
+                <th class="border-r border-slate-200">1-10</th><th class="border-r border-slate-200">11-20</th><th class="border-r border-slate-200">21-30</th><th class="border-r border-slate-200 bg-amber-50/80 font-bold">Foizi</th>
+                <th class="border-r border-slate-200">1-10</th><th class="border-r border-slate-200">11-20</th><th class="border-r border-slate-200">21-30</th><th class="border-r border-slate-200 bg-amber-50/80 font-bold">Foizi</th>
+                <th class="border-r border-slate-200">1-10</th><th class="border-r border-slate-200">11-20</th><th class="border-r border-slate-200">21-30</th><th class="border-r border-slate-200 bg-amber-50/80 font-bold">Foizi</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 text-[11px] font-semibold text-slate-700">
+              ${studentHtmlRows}
+              ${averageHtmlRow}
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-4 flex items-center justify-between text-[10px] text-slate-400 font-medium px-2">
+          <div>🏫 Boborahim Mashrab nomli xususiy maktab</div>
+          <div>Avtomatik hisobot tizimi — Gemini AI</div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+async function captureHtmlAsImage(htmlContent: string): Promise<Buffer> {
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none']
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1300, height: 900, deviceScaleFactor: 2 });
+    await page.setContent(htmlContent, { waitUntil: 'load' });
+    const element = await page.$('#capture-target');
+    if (!element) throw new Error('Capture target element not found');
+    const buffer = await element.screenshot({ type: 'png' });
+    return buffer as Buffer;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function sendAllClassImages(sheets: string[]) {
   if (!constants.targetExcelLink) throw new Error("TARGET_EXCEL_LINK sozlanmagan.");
   const fileId = getFileIdFromLink(constants.targetExcelLink);
@@ -1011,76 +1210,8 @@ async function sendAllClassImages(sheets: string[]) {
   const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
   const rawBuffer = Buffer.from(driveRes.data as ArrayBuffer);
 
-  const tempExcelPath = path.join(process.cwd(), 'temp_all_report.xlsx');
-  const tempImagePath = path.join(process.cwd(), 'temp_all_report.png');
-  const psScriptPath  = path.join(process.cwd(), 'extract_all.ps1');
-
-  // Excel'ni bir marta formatlayib diskka yozamiz
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(rawBuffer as any);
-  wb.worksheets.forEach(ws => {
-    for (let i = 4; i <= ws.rowCount; i++) {
-      const row = ws.getRow(i);
-      let col1Val = row.getCell(1).value;
-      if (col1Val && typeof col1Val === 'object' && 'result' in col1Val) col1Val = col1Val.result;
-      const isStudentRow = col1Val !== null && col1Val !== undefined && String(col1Val).trim() !== '' && !isNaN(Number(col1Val));
-      if (isStudentRow) {
-        const subjects = [
-          { cols: [4,5,6] }, { cols: [8,9,10] },
-          { cols: [12,13,14] }, { cols: [16,17,18] }
-        ];
-        let missedAll = true;
-        for (const sub of subjects) {
-          let hasSub = false;
-          for (const c of sub.cols) {
-            const val = row.getCell(c).value;
-            let actual = val;
-            if (val && typeof val === 'object' && 'result' in val) actual = val.result;
-            if (actual !== null && actual !== undefined && String(actual).trim() !== '') { hasSub = true; break; }
-          }
-          if (hasSub) missedAll = false;
-        }
-        if (missedAll) {
-          for (let c = 5; c <= 22; c++) row.getCell(c).value = null;
-          try { ws.mergeCells(`D${i}:V${i}`); } catch(e) {}
-          const mc = row.getCell(4);
-          mc.value = 'qatnashmadi';
-          mc.alignment = { horizontal: 'center', vertical: 'middle' };
-          mc.font = { size: 9, color: { argb: 'FF000000' } };
-        }
-      }
-    }
-  });
-  await wb.xlsx.writeFile(tempExcelPath);
-
-  // PowerShell skriptini bir marta yozamiz
-  const psCode = `
-param([string]$excelPath, [string]$sheetName, [string]$imagePath)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$excel = New-Object -ComObject Excel.Application
-$excel.Visible = $false
-$excel.DisplayAlerts = $false
-try {
-    $workbook = $excel.Workbooks.Open($excelPath)
-    $worksheet = $workbook.Sheets.Item($sheetName)
-    $lastRow = $worksheet.Cells.Item($worksheet.Rows.Count, 1).End(-4162).Row
-    if ($lastRow -lt 1) { $lastRow = 1 }
-    $range = $worksheet.Range("A1:V$lastRow")
-    $range.CopyPicture(1, 2) | Out-Null
-    Start-Sleep -Milliseconds 800
-    if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
-        $image = [System.Windows.Forms.Clipboard]::GetImage()
-        $image.Save($imagePath, [System.Drawing.Imaging.ImageFormat]::Png)
-        Write-Output "SUCCESS"
-    } else { Write-Error "Clipboard rasm yo'q" }
-} finally {
-    $workbook.Close($false)
-    $excel.Quit()
-    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
-}
-  `;
-  await fs.writeFile(psScriptPath, psCode);
 
   let sent = 0;
   let failed = 0;
@@ -1089,8 +1220,6 @@ try {
   console.log(`[ALL-IMAGES] Jami ${sheets.length} ta sinf yuboriladi...`);
 
   for (const sheetName of sheets) {
-    // Har sinf uchun faqat o'z kanal ID sini o'qiymiz
-    // Masalan: 1b → TELEGRAM_CLASS_1b, 3 → TELEGRAM_CLASS_3
     const envKey = `TELEGRAM_CLASS_${sheetName}`;
     const classChatId = (process.env[envKey] || '').trim();
 
@@ -1102,20 +1231,23 @@ try {
 
     try {
       console.log(`[ALL-IMAGES] 📸 ${sheetName} → ${envKey} (${classChatId}) ga yuborilmoqda...`);
-      await execPromise(`powershell -ExecutionPolicy Bypass -File "${psScriptPath}" "${tempExcelPath}" "${sheetName}" "${tempImagePath}"`);
-      const imgBuf = await fs.readFile(tempImagePath);
+      
+      const ws = wb.getWorksheet(sheetName);
+      if (!ws) {
+        console.warn(`[ALL-IMAGES] ⚠️ ${sheetName} varag'i topilmadi.`);
+        skipped++;
+        continue;
+      }
 
-      // Sinf nomini chiroyli formatlaymiz:
-      // 1tibg → 1-Tibbiyot (yashil), 1tib → 1-Tibbiyot
-      // 1b → 1-Blue, 1g → 1-Green
-      // 3, 4, 9 (faqat raqam) → Blue sinf (b suffiksi yo'q, lekin blue)
+      const htmlContent = generateSheetHtml(ws, sheetName);
+      const imgBuf = await captureHtmlAsImage(htmlContent);
+
       const displayName = sheetName
         .replace(/(\d+)tibg$/, '$1-Tibbiyot (yashil)')
         .replace(/(\d+)tib$/, '$1-Tibbiyot')
         .replace(/(\d+)b$/, '$1-Blue')
         .replace(/(\d+)g$/, '$1-Green')
-        .replace(/^(\d+)$/, '$1-Blue'); // faqat raqam → Blue
-
+        .replace(/^(\d+)$/, '$1-Blue');
 
       const caption = `Assalomu alaykum, hurmatli ota-onalar va aziz o'quvchilar!\n\n📊 ${displayName} sinfi — Haftalik imtihon natijalari\n\n✨ Agar natija yuqori bo'lsa — farzandingizni rag'batlantiring!\nAgar natija past bo'lsa — birga tahlil qiling va qo'llab-quvvatlang.\n\n🏫 Boborahim Mashrab nomli xususiy maktab`;
 
@@ -1127,11 +1259,6 @@ try {
       console.error(`[ALL-IMAGES] ❌ ${sheetName} xato: ${err.message}`);
     }
   }
-
-  // Temp fayllarni tozalash
-  try { await fs.unlink(tempExcelPath); } catch {}
-  try { await fs.unlink(tempImagePath); } catch {}
-  try { await fs.unlink(psScriptPath);  } catch {}
 
   console.log(`[ALL-IMAGES] ✅ Yakunlandi: ${sent} yuborildi, ${failed} xato, ${skipped} o'tkazildi.`);
 }
@@ -1173,116 +1300,60 @@ app.post('/api/send-image', async (req, res) => {
     const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
     const buffer = Buffer.from(driveRes.data as ArrayBuffer);
 
-    // Vaqtinchalik fayllar uchun yo'l
-    const tempExcelPath = path.join(process.cwd(), 'temp_report.xlsx');
-    const tempImagePath = path.join(process.cwd(), 'temp_report.png');
-    const psScriptPath = path.join(process.cwd(), 'extract_image.ps1');
-
-    await fs.writeFile(tempExcelPath, buffer);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer as any);
 
     // Rasmni olishdan oldin bo'sh qatorlarni "qatnashmadi" deb o'zgartiramiz
-    try {
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.readFile(tempExcelPath);
-      wb.worksheets.forEach(ws => {
-        for (let i = 4; i <= ws.rowCount; i++) {
-          const row = ws.getRow(i);
-          let col1Val = row.getCell(1).value;
-          if (col1Val && typeof col1Val === 'object' && 'result' in col1Val) col1Val = col1Val.result;
-          
-          const isStudentRow = col1Val !== null && col1Val !== undefined && String(col1Val).trim() !== '' && !isNaN(Number(col1Val));
-          
-          if (isStudentRow) {
-            const subjects = [
-              { cols: [4,5,6], foizi: 7 },
-              { cols: [8,9,10], foizi: 11 },
-              { cols: [12,13,14], foizi: 15 },
-              { cols: [16,17,18], foizi: 19 }
-            ];
+    wb.worksheets.forEach(ws => {
+      for (let i = 4; i <= ws.rowCount; i++) {
+        const row = ws.getRow(i);
+        let col1Val = row.getCell(1).value;
+        if (col1Val && typeof col1Val === 'object' && 'result' in col1Val) col1Val = col1Val.result;
+        
+        const isStudentRow = col1Val !== null && col1Val !== undefined && String(col1Val).trim() !== '' && !isNaN(Number(col1Val));
+        
+        if (isStudentRow) {
+          const subjects = [
+            { cols: [4,5,6] }, { cols: [8,9,10] },
+            { cols: [12,13,14] }, { cols: [16,17,18] }
+          ];
 
-            let missedAll = true;
+          let missedAll = true;
 
-            for (const sub of subjects) {
-              let hasSubGrade = false;
-              for (const c of sub.cols) {
-                const val = row.getCell(c).value;
-                let actualVal = val;
-                if (val && typeof val === 'object' && 'result' in val) actualVal = val.result;
-                if (actualVal !== null && actualVal !== undefined && String(actualVal).trim() !== '') {
-                  hasSubGrade = true;
-                  break;
-                }
+          for (const sub of subjects) {
+            let hasSubGrade = false;
+            for (const c of sub.cols) {
+              const val = row.getCell(c).value;
+              let actualVal = val;
+              if (val && typeof val === 'object' && 'result' in val) actualVal = val.result;
+              if (actualVal !== null && actualVal !== undefined && String(actualVal).trim() !== '') {
+                hasSubGrade = true;
+                break;
               }
-              if (hasSubGrade) missedAll = false;
             }
+            if (hasSubGrade) missedAll = false;
+          }
 
-            if (missedAll) {
-              for (let c = 5; c <= 22; c++) {
-                row.getCell(c).value = null;
-              }
-              try { ws.mergeCells(`D${i}:V${i}`); } catch(e) {}
-              const mergedCell = row.getCell(4);
-              mergedCell.value = 'qatnashmadi';
-              mergedCell.alignment = { horizontal: 'center', vertical: 'middle' };
-              mergedCell.font = { size: 9, color: { argb: 'FF000000' } };
+          if (missedAll) {
+            for (let c = 5; c <= 22; c++) {
+              row.getCell(c).value = null;
             }
+            try { ws.mergeCells(`D${i}:V${i}`); } catch(e) {}
+            const mergedCell = row.getCell(4);
+            mergedCell.value = 'qatnashmadi';
           }
         }
-      });
-      await wb.xlsx.writeFile(tempExcelPath);
-    } catch (err) {
-      console.warn("Excel formatlashda xato:", err);
-    }
+      }
+    });
 
-    console.log("[SEND-IMAGE] 2/3 - Excel dasturi orqali rasmga olinmoqda...");
-    
-    // Powershell skriptini yozish (MS Excel'ni orqa fonda ochib UseRange ni rasmga oladi)
-    const psCode = `
-param([string]$excelPath, [string]$sheetName, [string]$imagePath)
+    console.log("[SEND-IMAGE] 2/3 - Puppeteer orqali rasmga olinmoqda...");
+    const ws = wb.getWorksheet(targetSheet);
+    if (!ws) throw new Error(`Worksheet not found: ${targetSheet}`);
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-$excel = New-Object -ComObject Excel.Application
-$excel.Visible = $false
-$excel.DisplayAlerts = $false
-
-try {
-    $workbook = $excel.Workbooks.Open($excelPath)
-    $worksheet = $workbook.Sheets.Item($sheetName)
-
-    # Faqat kerakli hududni rasmga olamiz (A1:V + oxirgi qatorgacha)
-    $lastRow = $worksheet.Cells.Item($worksheet.Rows.Count, 1).End(-4162).Row
-    if ($lastRow -lt 1) { $lastRow = 1 }
-    $range = $worksheet.Range("A1:V$lastRow")
-    $range.CopyPicture(1, 2) | Out-Null
-
-    Start-Sleep -Milliseconds 1000
-
-    if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
-        $image = [System.Windows.Forms.Clipboard]::GetImage()
-        $image.Save($imagePath, [System.Drawing.Imaging.ImageFormat]::Png)
-        Write-Output "SUCCESS"
-    } else {
-        Write-Error "Clipboardda rasm yo'q"
-    }
-} finally {
-    $workbook.Close($false)
-    $excel.Quit()
-    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
-}
-    `;
-
-    await fs.writeFile(psScriptPath, psCode);
-
-    // Powershell'ni chaqirish
-    await execPromise(`powershell -ExecutionPolicy Bypass -File "${psScriptPath}" "${tempExcelPath}" "${targetSheet}" "${tempImagePath}"`);
+    const htmlContent = generateSheetHtml(ws, targetSheet);
+    const imageBuffer = await captureHtmlAsImage(htmlContent);
 
     console.log("[SEND-IMAGE] 3/3 - Rasm Telegramga yuborilmoqda...");
-    
-    // Rasm faylini o'qib yuborish
-    const imageBuffer = await fs.readFile(tempImagePath);
-    
     const captionText = `Assalomu alaykum, hurmatli ota-onalar va aziz o‘quvchilar!
 
 📌 Haftalik imtihon natijalari bilan tanishing.
@@ -1297,13 +1368,6 @@ Agar natija past bo‘lsa — tanqidga shoshilmang, aksincha, farzandingiz bilan
       captionText, 
       channel3 || undefined
     );
-
-    // Temp fayllarni o'chirish
-    try {
-      await fs.unlink(tempExcelPath);
-      await fs.unlink(tempImagePath);
-      await fs.unlink(psScriptPath);
-    } catch(e) {}
 
     res.json({ success: true, message: 'Rasm muvaffaqiyatli olinib, yuborildi!' });
   } catch (error) {
