@@ -1,0 +1,6 @@
+{
+  "name": "Avto Hisobot AI",
+  "description": "Har hafta AI yordamida Excel yaratadi va uni Telegram orqali yuboradi, Google Drive bilan integratsiyalangan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
