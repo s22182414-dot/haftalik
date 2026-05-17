@@ -1134,7 +1134,7 @@ function generateSheetHtml(ws: any, sheetName: string): string {
     </head>
     <body class="bg-slate-900 p-6 flex justify-center items-center">
       <div id="capture-target" class="w-[1250px] bg-white rounded-3xl overflow-hidden shadow-2xl border border-slate-200 p-6">
-        <div class="bg-gradient-to-r ${theme.primary} text-white text-center py-6 px-8 rounded-2xl mb-6 shadow-md">
+        <div class="bg-linear-to-r ${theme.primary} text-white text-center py-6 px-8 rounded-2xl mb-6 shadow-md">
           <h1 class="text-3xl font-black tracking-wide uppercase">${title}</h1>
           <p class="text-indigo-100 text-sm mt-1.5 font-semibold">Haftalik imtihon natijalari hisoboti</p>
         </div>
