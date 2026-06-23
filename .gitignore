@@ -11,3 +11,6 @@ service-account*.json
 tokens.json
 database.json
 scratch/
+last_grades.json
+*.png
+

@@ -13,13 +13,15 @@ import { Readable } from 'stream';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
+import { TelegramClient, Api } from 'telegram';
+import { StringSession } from 'telegram/sessions/index.js';
 
 import { exec } from 'child_process';
 import util from 'util';
 
 const execPromise = util.promisify(exec);
 const app = express();
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = parseInt(process.env.PORT || '3001', 10);
 
 app.use(express.json());
 
@@ -111,6 +113,13 @@ app.get('/api/auth/google/callback', async (req, res) => {
 });// --- Database Logic ---
 const DB_FILE = path.join(process.cwd(), 'database.json');
 
+// --- Telegram Userbot State ---
+let tempTelegramClient: any = null;
+let tempPhoneNumber = "";
+let tempPhoneCodeHash = "";
+let tempApiId = 0;
+let tempApiHash = "";
+
 async function initDB() {
   try {
     await fs.access(DB_FILE);
@@ -154,6 +163,155 @@ app.get('/api/data/:collection', async (req, res) => {
   const db = await readDB();
   if (db[collection]) res.json(db[collection]);
   else res.status(404).json({ error: 'Topilmadi' });
+});
+
+// ── Telegram Userbot API Endpoints ──
+
+app.get('/api/userbot/status', async (req, res) => {
+  try {
+    const db = await readDB();
+    if (db.userbotSession) {
+      return res.json({
+        connected: true,
+        phoneNumber: db.userbotSession.phoneNumber,
+        apiId: db.userbotSession.apiId
+      });
+    }
+    return res.json({ connected: false });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/userbot/connect', async (req, res) => {
+  const { apiId, apiHash, phoneNumber } = req.body;
+  if (!apiId || !apiHash || !phoneNumber) {
+    return res.status(400).json({ error: "API ID, API Hash va Telefon raqami majburiy." });
+  }
+
+  try {
+    if (tempTelegramClient) {
+      try { await tempTelegramClient.disconnect(); } catch {}
+      tempTelegramClient = null;
+    }
+
+    tempApiId = parseInt(apiId);
+    tempApiHash = apiHash.trim();
+    tempPhoneNumber = phoneNumber.trim();
+
+    const session = new StringSession("");
+    tempTelegramClient = new TelegramClient(session, tempApiId, tempApiHash, {
+      connectionRetries: 5,
+    });
+
+    console.log(`[USERBOT] Telegramga ulanmoqda (${tempPhoneNumber})...`);
+    await tempTelegramClient.connect();
+
+    console.log(`[USERBOT] Tasdiqlash kodi so'ralmoqda...`);
+    const result = await tempTelegramClient.sendCode({
+      apiId: tempApiId,
+      apiHash: tempApiHash,
+    }, tempPhoneNumber);
+
+    tempPhoneCodeHash = result.phoneCodeHash;
+    console.log(`[USERBOT] Tasdiqlash kodi muvaffaqiyatli so'raldi.`);
+    res.json({ success: true, message: "Kod yuborildi. Iltimos, Telegramingizni tekshiring." });
+  } catch (error: any) {
+    console.error(`[USERBOT] Ulanishda xato:`, error.message);
+    res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/userbot/verify', async (req, res) => {
+  const { code, password } = req.body;
+  if (!code) {
+    return res.status(400).json({ error: "Tasdiqlash kodi kiritilishi shart." });
+  }
+
+  if (!tempTelegramClient) {
+    return res.status(400).json({ error: "Ulanish sessiyasi topilmadi. Avval kod yuboring." });
+  }
+
+  try {
+    console.log(`[USERBOT] Kod tekshirilmoqda: ${code}`);
+    
+    let user;
+    try {
+      user = await tempTelegramClient.invoke(
+        new Api.auth.SignIn({
+          phoneNumber: tempPhoneNumber,
+          phoneCodeHash: tempPhoneCodeHash,
+          phoneCode: code,
+        })
+      );
+    } catch (signInErr: any) {
+      if (signInErr.message.includes("SESSION_PASSWORD_NEEDED")) {
+        if (!password) {
+          return res.json({ success: false, passwordRequired: true, message: "Ikki bosqichli parol (2FA) talab etiladi." });
+        }
+        console.log(`[USERBOT] 2FA parol bilan kirishga urinish...`);
+        user = await tempTelegramClient.signInWithPassword(
+          {
+            apiId: tempApiId,
+            apiHash: tempApiHash,
+          },
+          {
+            password: async () => password,
+            onError: (err: any) => {
+              console.error("[USERBOT] signInWithPassword error:", err.message || err);
+              throw err;
+            }
+          }
+        );
+      } else {
+        throw signInErr;
+      }
+    }
+
+    const sessionStr = tempTelegramClient.session.save() as string;
+    
+    const db = await readDB();
+    db.userbotSession = {
+      apiId: tempApiId,
+      apiHash: tempApiHash,
+      phoneNumber: tempPhoneNumber,
+      sessionStr: sessionStr
+    };
+    await writeDB(db);
+
+    console.log(`[USERBOT] Muvaffaqiyatli ulandi!`);
+    
+    tempTelegramClient = null;
+    tempPhoneNumber = "";
+    tempPhoneCodeHash = "";
+    tempApiId = 0;
+    tempApiHash = "";
+
+    res.json({ success: true, message: "Telegram profilingiz muvaffaqiyatli ulandi!" });
+  } catch (error: any) {
+    console.error(`[USERBOT] Kod tasdiqlashda xato:`, error.message);
+    res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/userbot/disconnect', async (req, res) => {
+  try {
+    const db = await readDB();
+    if (db.userbotSession) {
+      try {
+        const session = new StringSession(db.userbotSession.sessionStr);
+        const client = new TelegramClient(session, db.userbotSession.apiId, db.userbotSession.apiHash, { connectionRetries: 1 });
+        await client.connect();
+        await client.invoke(new Api.auth.LogOut());
+      } catch (e) {}
+
+      delete db.userbotSession;
+      await writeDB(db);
+    }
+    res.json({ success: true, message: "Ulanish uzildi." });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
 });
 
 app.post('/api/data/:collection', async (req, res) => {
@@ -550,13 +708,19 @@ async function uploadToDrive(buffer: Buffer, filename: string) {
 // Bitta kanalga xabar yuborish (xabar uzunligini hisobga olgan holda bo'lib yuboradi)
 async function sendToSingleChat(bot: TelegramBot, chatId: string, message: string): Promise<void> {
   const MAX_LEN = 4000;
+  const isPlainUrl = /^https?:\/\/[^\s]+$/.test(message.trim());
+
   if (message.length <= MAX_LEN) {
-    await bot.sendMessage(chatId, message, {
-      parse_mode: 'HTML',
-      // @ts-ignore (in case older types)
-      link_preview_options: { is_disabled: false },
-      disable_web_page_preview: false
-    });
+    if (isPlainUrl) {
+      // Faqat URL — hech qanday option bermaymiz
+      // Telegram o'zi Google Docs preview kartasini ko'rsatadi
+      await bot.sendMessage(chatId, message);
+    } else {
+      await bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: false
+      });
+    }
     return;
   }
 
@@ -586,19 +750,102 @@ async function sendToSingleChat(bot: TelegramBot, chatId: string, message: strin
   }
 }
 
-// Barcha kanallar yoki faqat bitta kanalga xabar yuborish
+async function getUserbotClient() {
+  try {
+    const db = await readDB();
+    if (db.userbotSession && db.userbotSession.sessionStr) {
+      const session = new StringSession(db.userbotSession.sessionStr);
+      const client = new TelegramClient(session, parseInt(db.userbotSession.apiId), db.userbotSession.apiHash, {
+        connectionRetries: 3,
+      });
+      return client;
+    }
+  } catch (e) {
+    console.error("[USERBOT] Client yaratishda xatolik:", (e as Error).message);
+  }
+  return null;
+}
+
+async function connectUserbot(client: TelegramClient) {
+  await client.connect();
+  try {
+    await client.getDialogs({ limit: 100 });
+  } catch (e: any) {
+    console.warn("[USERBOT] Dialoglarni yuklashda xatolik:", e.message);
+  }
+}
+
+// Link preview kartasini ko'rsatib xabar yuborish
+async function sendLinkWithPreview(chatId: string, text: string, linkUrl: string): Promise<void> {
+  const userbot = await getUserbotClient();
+  if (userbot) {
+    try {
+      console.log(`[Telegram] [USERBOT] Link yuborilmoqda: ${chatId}`);
+      await connectUserbot(userbot);
+      await userbot.sendMessage(chatId, { message: text });
+      await userbot.disconnect();
+      return; // Shaxsiy profil orqali muvaffaqiyatli yuborildi
+    } catch (err: any) {
+      console.error(`[Telegram] [USERBOT] Yuborishda xato, BOT orqali yuboriladi: ${err.message}`);
+    }
+  }
+
+  // Fallback: Telegram Bot
+  const bot = new TelegramBot(constants.telegramBotToken, { polling: false });
+  await bot.sendMessage(chatId, text, {
+    disable_web_page_preview: false,
+    link_preview_options: {
+      is_disabled: false,
+      prefer_large_media: true,
+      url: linkUrl
+    }
+  } as any);
+}
+
+
 // specificChatId berilsa — faqat shu kanalga, berilmasa — barchasiga
-async function sendToTelegram(message: string, specificChatId?: string) {
+async function sendToTelegram(message: string, specificChatId?: string, forceBot: boolean = false) {
   const chatIds = specificChatId ? [specificChatId] : constants.telegramChatIds;
 
+  if (!forceBot) {
+    const userbot = await getUserbotClient();
+    if (userbot) {
+      try {
+        console.log(`[Telegram] [USERBOT] ${chatIds.length} ta kanalga xabar yuborishga urinilmoqda...`);
+        await connectUserbot(userbot);
+        
+        let successCount = 0;
+        for (const chatId of chatIds) {
+          try {
+            await userbot.sendMessage(chatId, { message });
+            successCount++;
+            console.log(`[Telegram] [USERBOT] ✅ Kanal ${chatId} — yuborildi.`);
+          } catch (e: any) {
+            console.error(`[Telegram] [USERBOT] ❌ Kanal ${chatId} — xato: ${e.message}`);
+          }
+        }
+        
+        await userbot.disconnect();
+        
+        if (successCount > 0) {
+          console.log(`[Telegram] [USERBOT] Natija: ${successCount}/${chatIds.length} ta kanalga profilingizdan yuborildi.`);
+          return; // Muvaffaqiyatli
+        }
+        console.log("[Telegram] [USERBOT] Profil orqali birorta ham guruhga xabar ketmadi, BOT ga o'tiladi.");
+      } catch (err: any) {
+        console.error(`[Telegram] [USERBOT] Umumiy xato, BOT ga o'tilmoqda: ${err.message}`);
+      }
+    }
+  }
+
+  // Fallback: Telegram Bot
   if (!constants.telegramBotToken || chatIds.length === 0) {
     console.warn("[Telegram] ⚠️ Token yoki Chat ID(lar) sozlanmagan! .env faylini tekshiring.");
     return;
   }
 
   const bot = new TelegramBot(constants.telegramBotToken, { polling: false });
-
-  console.log(`[Telegram] 📤 ${chatIds.length} ta kanalga xabar yuborilmoqda...`);
+  console.log(`[Telegram] [BOT] 📤 ${chatIds.length} ta kanalga xabar yuborilmoqda...`);
 
   const results = await Promise.allSettled(
     chatIds.map(chatId => sendToSingleChat(bot, chatId, message))
@@ -608,13 +855,13 @@ async function sendToTelegram(message: string, specificChatId?: string) {
   results.forEach((result, idx) => {
     if (result.status === 'fulfilled') {
       successCount++;
-      console.log(`[Telegram] ✅ Kanal ${chatIds[idx]} — yuborildi.`);
+      console.log(`[Telegram] [BOT] ✅ Kanal ${chatIds[idx]} — yuborildi.`);
     } else {
-      console.error(`[Telegram] ❌ Kanal ${chatIds[idx]} — xato: ${result.reason?.message || result.reason}`);
+      console.error(`[Telegram] [BOT] ❌ Kanal ${chatIds[idx]} — xato: ${result.reason?.message || result.reason}`);
     }
   });
 
-  console.log(`[Telegram] Natija: ${successCount}/${chatIds.length} ta kanalga muvaffaqiyatli yuborildi.`);
+  console.log(`[Telegram] [BOT] Natija: ${successCount}/${chatIds.length} ta kanalga muvaffaqiyatli yuborildi.`);
 
   if (successCount === 0) {
     throw new Error(`Hech qaysi kanalga xabar yuborib bo'lmadi (${chatIds.length} ta sinab ko'rildi).`);
@@ -625,26 +872,61 @@ async function sendToTelegram(message: string, specificChatId?: string) {
 async function sendPhotoToTelegram(photoBuffer: Buffer, caption: string, specificChatId?: string) {
   const chatIds = specificChatId ? [specificChatId] : constants.telegramChatIds;
 
+  const userbot = await getUserbotClient();
+  if (userbot) {
+    try {
+      console.log(`[Telegram] [USERBOT] 📸 ${chatIds.length} ta kanalga rasm yuborishga urinilmoqda...`);
+      await connectUserbot(userbot);
+      
+      const { CustomFile } = await import("telegram/client/uploads.js");
+      const toSend = new CustomFile("report.png", photoBuffer.length, "", photoBuffer);
+
+      let successCount = 0;
+      for (const chatId of chatIds) {
+        try {
+          await userbot.sendFile(chatId, {
+            file: toSend,
+            caption: caption
+          });
+          successCount++;
+          console.log(`[Telegram] [USERBOT] ✅ Kanal ${chatId} — rasm yuborildi.`);
+        } catch (e: any) {
+          console.error(`[Telegram] [USERBOT] ❌ Kanal ${chatId} — rasm xatosi: ${e.message}`);
+        }
+      }
+      
+      await userbot.disconnect();
+      
+      if (successCount > 0) {
+        console.log(`[Telegram] [USERBOT] Natija: ${successCount}/${chatIds.length} ta kanalga profilingizdan rasm yuborildi.`);
+        return; // Muvaffaqiyatli
+      }
+      console.log("[Telegram] [USERBOT] Profil orqali birorta ham guruhga rasm ketmadi, BOT ga o'tiladi.");
+    } catch (err: any) {
+      console.error(`[Telegram] [USERBOT] Umumiy rasm xatosi, BOT ga o'tilmoqda: ${err.message}`);
+    }
+  }
+
+  // Fallback: Telegram Bot
   if (!constants.telegramBotToken || chatIds.length === 0) {
     console.warn("[Telegram] ⚠️ Token yoki Chat ID(lar) sozlanmagan! .env faylini tekshiring.");
     return;
   }
 
   const bot = new TelegramBot(constants.telegramBotToken, { polling: false });
-
-  console.log(`[Telegram] 📸 ${chatIds.length} ta kanalga rasm yuborilmoqda...`);
+  console.log(`[Telegram] [BOT] 📸 ${chatIds.length} ta kanalga rasm yuborilmoqda...`);
 
   const results = await Promise.allSettled(
     chatIds.map(async (chatId) => {
       try {
-        await bot.sendPhoto(chatId, photoBuffer, { caption }, { filename: 'report.png', contentType: 'image/png' });
-        console.log(`[Telegram] ✅ Kanal ${chatId} — rasm yuborildi.`);
+        await bot.sendPhoto(chatId, photoBuffer, { caption, parse_mode: 'HTML' }, { filename: 'report.png', contentType: 'image/png' });
+        console.log(`[Telegram] [BOT] ✅ Kanal ${chatId} — rasm yuborildi.`);
       } catch (error: any) {
-        console.error(`[Telegram] ❌ Kanal ${chatId} — rasm xatosi: ${error.message || error}`);
+        console.error(`[Telegram] [BOT] ❌ Kanal ${chatId} — rasm xatosi: ${error.message || error}`);
         if (error.message && error.message.includes('PHOTO_INVALID_DIMENSIONS')) {
-          console.log(`[Telegram] 🔄 Kanal ${chatId} — Rasm o'lchami katta, hujjat (document) sifatida yuborilmoqda...`);
+          console.log(`[Telegram] [BOT] 🔄 Kanal ${chatId} — Rasm o'lchami katta, hujjat (document) sifatida yuborilmoqda...`);
           await bot.sendDocument(chatId, photoBuffer, { caption }, { filename: 'report.png', contentType: 'image/png' });
-          console.log(`[Telegram] ✅ Kanal ${chatId} — hujjat sifatida yuborildi.`);
+          console.log(`[Telegram] [BOT] ✅ Kanal ${chatId} — hujjat sifatida yuborildi.`);
         } else {
           throw error;
         }
@@ -659,8 +941,16 @@ async function sendPhotoToTelegram(photoBuffer: Buffer, caption: string, specifi
   }
 }
 
+let isJobRunning = false;
+let isAnalyzeRunning = false;
+
 // Juma kuni: haftalik imtihon baholarini tozalash va o'qituvchilar guruhiga xabar berish
 async function runJob() {
+  if (isJobRunning) {
+    console.log("[JOB] ⚠️ Job allaqachon ishlamoqda. Yangi ishga tushirish bekor qilindi.");
+    throw new Error("Hisobotni tozalash jarayoni allaqachon bajarilmoqda. Iltimos, u tugashini kuting.");
+  }
+  isJobRunning = true;
   console.log("\n===== JOB BOSHLANDI =====");
 
   // O'qituvchilar guruhi — TELEGRAM_CHANNEL_1
@@ -729,6 +1019,62 @@ async function runJob() {
       }
     });
 
+    // ===== BAHOLARNI TOZALASHDAN OLDIN SAQLASH =====
+    // analyzeJob Shanba kuni shu ma'lumotlardan foydalanadi
+    console.log("[JOB] 📝 Baholar last_grades.json ga saqlanmoqda...");
+    const gradesSnapshot: Record<string, any[]> = {};
+    workbook.worksheets.forEach(ws => {
+      let percentColsInfo: { colNum: number, isOverall: boolean }[] = [];
+      for (let r = 1; r <= 4; r++) {
+        ws.getRow(r).eachCell((cell, colNum) => {
+          const val = String(cell.value || '').toLowerCase();
+          if (val.includes('%') || val.includes('foiz')) {
+            const isOverall = val.includes('umumiy') || val.includes("o'rtacha") || val.includes("o`rtacha");
+            if (!percentColsInfo.some(p => p.colNum === colNum)) {
+              percentColsInfo.push({ colNum, isOverall });
+            }
+          }
+        });
+      }
+      let percentColIndex = -1;
+      percentColsInfo.forEach(p => { if (p.colNum > percentColIndex) percentColIndex = p.colNum; });
+      if (percentColIndex === -1) return;
+
+      const students: any[] = [];
+      for (let i = 2; i <= ws.rowCount; i++) {
+        const row = ws.getRow(i);
+        let col1 = row.getCell(1).value;
+        if (col1 && typeof col1 === 'object' && 'result' in col1) col1 = (col1 as any).result;
+        if (col1 === null || col1 === undefined || isNaN(Number(col1))) continue;
+        const fam = String(row.getCell(2).value || '').trim();
+        const ism = String(row.getCell(3).value || '').trim();
+        if (!fam && !ism) continue;
+
+        // Haqiqiy baho katakchalarini tekshirish (formula emas, raqam > 0)
+        let hasReal = false;
+        for (let c = 4; c < percentColIndex; c++) {
+          const cell = row.getCell(c);
+          if (cell.type === ExcelJS.ValueType.Formula) continue;
+          if (!isNaN(parseFloat(String(cell.value ?? ''))) && parseFloat(String(cell.value)) > 0) {
+            hasReal = true; break;
+          }
+        }
+        let foiz = 0;
+        if (hasReal) {
+          let pv = row.getCell(percentColIndex).value;
+          if (pv && typeof pv === 'object' && 'result' in pv) pv = (pv as any).result;
+          foiz = parseFloat(String(pv || '0')) || 0;
+        }
+        students.push({ ism_familiya: `${fam} ${ism}`.trim(), foiz });
+      }
+      gradesSnapshot[ws.name] = students;
+    });
+    const LAST_GRADES_PATH = path.join(process.cwd(), 'last_grades.json');
+    await fs.writeFile(LAST_GRADES_PATH, JSON.stringify(gradesSnapshot, null, 2), 'utf-8');
+    console.log(`[JOB] ✅ last_grades.json saqlandi (${Object.keys(gradesSnapshot).length} sinf)`);
+    // ===== SAQLASH TUGADI =====
+
+    // Tozalangan faylni buffer ga yozamiz (Drive ga yuklash uchun)
     const updatedBuffer = Buffer.from(await workbook.xlsx.writeBuffer());
 
     // Fayl nomini olish va haftalik raqamni oshirish
@@ -765,161 +1111,205 @@ async function runJob() {
       }
     });
 
-    const fileMeta = await drive.files.get({ fileId, fields: 'webViewLink' });
-    const fileLink = fileMeta.data.webViewLink || constants.targetExcelLink;
+    console.log("[JOB] 4.5/5 - Google Drive'da preview rasm tayyorlanishi kutilmoqda...");
+    let thumbnailGenerated = false;
+    for (let attempt = 1; attempt <= 15; attempt++) {
+      try {
+        const check = await drive.files.get({
+          fileId: fileId,
+          fields: 'thumbnailLink'
+        });
+        if (check.data.thumbnailLink) {
+          console.log(`[JOB] ✅ Google Drive preview rasm tayyor! (Urinish: ${attempt})`);
+          thumbnailGenerated = true;
+          break;
+        }
+      } catch (e) {
+        console.warn(`[JOB] Preview tekshirishda xatolik:`, (e as Error).message);
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    if (!thumbnailGenerated) {
+      console.warn("[JOB] ⚠️ Google Drive preview rasmni 30 soniyada tayyorlay olmadi. Shunday bo'lsa ham xabar yuboriladi.");
+    }
+
+    const cleanLink = constants.targetExcelLink.replace(
+      /spreadsheets\/d\/[^\/]+/,
+      `spreadsheets/d/${fileId}`
+    ) + `&t=${Date.now()}`;
+    const messageText = `📌 Yangi haftalik imtihon fayli tayyorlandi:\n${cleanLink}`;
 
     console.log("[JOB] 5/5 - O'qituvchilar guruhiga (CHANNEL_1) xabar yuborilmoqda...");
-    const cacheBusterUrl = fileLink + (fileLink.includes('?') ? '&' : '?') + 'v=' + Date.now();
-    const messageHtml = `<a href="${cacheBusterUrl}">${fileLink}</a>`;
-    await sendToTelegram(
-      messageHtml,
-      teachersChatId || undefined   // CHANNEL_1 (o'qituvchilar guruhi)
+
+    const chatIds = teachersChatId
+      ? [teachersChatId]
+      : constants.telegramChatIds;
+
+    const results = await Promise.allSettled(
+      chatIds.map(cid => sendLinkWithPreview(cid, messageText, cleanLink))
     );
+
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        console.log(`[Telegram] ✅ Kanal ${chatIds[i]} — yuborildi.`);
+      } else {
+        console.error(`[Telegram] ❌ Kanal ${chatIds[i]} — xato: ${(r as any).reason?.message}`);
+      }
+    });
+
     console.log("===== JOB MUVAFFAQIYATLI YAKUNLANDI =====");
 
   } catch (error) {
     const msg = (error as Error).message;
     console.error("[JOB] ❌ XATO:", msg);
-
     try {
-      // Xatolikni ham o'qituvchilar guruhiga yuborish
+      const teachersChatId = (process.env.TELEGRAM_CHANNEL_1 || '').trim();
       await sendToTelegram(`❌ Hisobot xatosi:\n${msg}`, teachersChatId || undefined);
     } catch (telegramErr: any) {
       console.error("[JOB] Telegram ga ham yuborib bo'lmadi:", telegramErr?.message);
     }
+  } finally {
+    isJobRunning = false;
   }
 }
 
 
-
 // Shanba kungi AI Tahlil Job (Rahbariyat guruhi uchun)
 async function analyzeJob() {
+  if (isAnalyzeRunning) {
+    console.log("[ANALYZE] ⚠️ AI tahlil allaqachon ishlamoqda. Yangi ishga tushirish bekor qilindi.");
+    throw new Error("AI tahlil jarayoni allaqachon bajarilmoqda. Iltimos, u tugashini kuting.");
+  }
+  isAnalyzeRunning = true;
   console.log("\n===== ANALYZE JOB BOSHLANDI =====");
 
-  // Rahbariyat guruhi — TELEGRAM_CHANNEL_2
   const managementChatId = (process.env.TELEGRAM_CHANNEL_2 || '').trim();
   try {
-    if (!constants.targetExcelLink) {
-      throw new Error("TARGET_EXCEL_LINK .env faylida ko'rsatilmagan.");
-    }
-    const fileId = getFileIdFromLink(constants.targetExcelLink);
-    if (!fileId) throw new Error("Linkdan Fayl ID sini ajratib bo'lmadi.");
+    const LAST_GRADES_PATH = path.join(process.cwd(), 'last_grades.json');
 
-    console.log(`[ANALYZE] 1/4 - Drive'dan fayl olinmoqda (ID: ${fileId})...`);
-    
-    const oauth2Client = getOAuthClient();
+    let schoolData: Record<string, any[]>;
+
+    // 1-usul: last_grades.json dan o'qish (Juma: Hisobot bosilgan bo'lsa)
+    let usedCache = false;
     try {
-      const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-      oauth2Client.setCredentials(JSON.parse(tokens));
-    } catch (e) {
-      throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
-    }
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+      const raw = await fs.readFile(LAST_GRADES_PATH, 'utf-8');
+      schoolData = JSON.parse(raw);
+      usedCache = true;
+      console.log(`[ANALYZE] ✅ last_grades.json topildi — ${Object.keys(schoolData).length} sinf`);
+    } catch (_) {
+      // 2-usul: To'g'ridan Google Drive dan o'qish
+      console.log("[ANALYZE] last_grades.json yo'q — Drive'dan o'qilmoqda...");
+      const fileId = getFileIdFromLink(constants.targetExcelLink);
+      if (!fileId) throw new Error("TARGET_EXCEL_LINK noto'g'ri yoki ko'rsatilmagan.");
 
-    const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
-    const buffer = Buffer.from(res.data as ArrayBuffer) as any;
-
-    console.log("[ANALYZE] 2/4 - Fayldan ma'lumotlar o'qilmoqda...");
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
-
-    const schoolData: Record<string, any[]> = {};
-
-    workbook.worksheets.forEach(ws => {
-      let percentColsInfo: { colNum: number, isOverall: boolean }[] = [];
-      for (let r = 1; r <= 4; r++) {
-        const headerRow = ws.getRow(r);
-        headerRow.eachCell((cell, colNum) => {
-          const val = String(cell.value || '').toLowerCase();
-          if (val.includes('%') || val.includes('foiz')) {
-             const isOverall = val.includes("umumiy") || val.includes("o'rtacha") || val.includes("o`rtacha") || val.includes("o‘rtacha");
-             if (!percentColsInfo.some(p => p.colNum === colNum)) {
-                 percentColsInfo.push({ colNum, isOverall });
-             }
-          }
-        });
+      const oauth2Client = getOAuthClient();
+      try {
+        const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
+        oauth2Client.setCredentials(JSON.parse(tokens));
+      } catch (e) {
+        throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
       }
+      const drive = google.drive({ version: 'v3', auth: oauth2Client });
+      const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+      const buffer = Buffer.from(res.data as ArrayBuffer) as any;
 
-      let percentColIndex = -1;
-      let subjectPercentCols: number[] = [];
-      percentColsInfo.forEach(p => {
-          if (p.colNum > percentColIndex) percentColIndex = p.colNum;
-          if (!p.isOverall) subjectPercentCols.push(p.colNum);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      schoolData = {};
+
+      workbook.worksheets.forEach(ws => {
+        let percentColIndex = -1;
+        for (let r = 1; r <= 4; r++) {
+          ws.getRow(r).eachCell((cell, colNum) => {
+            const val = String(cell.value || '').toLowerCase();
+            if ((val.includes('%') || val.includes('foiz')) && colNum > percentColIndex) {
+              percentColIndex = colNum;
+            }
+          });
+        }
+        if (percentColIndex === -1) return;
+
+        const students: any[] = [];
+        for (let i = 2; i <= ws.rowCount; i++) {
+          const row = ws.getRow(i);
+          let col1 = row.getCell(1).value;
+          if (col1 && typeof col1 === 'object' && 'result' in col1) col1 = (col1 as any).result;
+          if (!col1 || isNaN(Number(col1))) continue;
+          const fam = String(row.getCell(2).value || '').trim();
+          const ism = String(row.getCell(3).value || '').trim();
+          if (!fam && !ism) continue;
+
+          // Faqat formula bo'lmagan haqiqiy baho katakchalarini tekshiramiz
+          let hasReal = false;
+          for (let c = 4; c < percentColIndex; c++) {
+            const cell = row.getCell(c);
+            if (cell.type === ExcelJS.ValueType.Formula) continue;
+            const n = parseFloat(String(cell.value ?? ''));
+            if (!isNaN(n) && n > 0) { hasReal = true; break; }
+          }
+
+          let foiz = 0;
+          if (hasReal) {
+            let pv = row.getCell(percentColIndex).value;
+            if (pv && typeof pv === 'object' && 'result' in pv) pv = (pv as any).result;
+            foiz = parseFloat(String(pv || '0')) || 0;
+          }
+          students.push({ ism_familiya: `${fam} ${ism}`.trim(), foiz });
+        }
+        schoolData[ws.name] = students;
+      });
+      console.log(`[ANALYZE] ✅ Drive'dan ${Object.keys(schoolData).length} sinf o'qildi`);
+    }
+
+    // Sinf nomini o'zgartirish — tartib muhim: tib b dan oldin bo'lishi kerak!
+    function formatClassName(name: string): string {
+      const n = name.trim();
+      if (/^\d+tib$/i.test(n))   return n.replace(/^(\d+)tib$/i, '$1-tibbiyot');
+      if (/^\d+b$/i.test(n))     return n.replace(/^(\d+)b$/i,   '$1-blue');
+      if (/^\d+g$/i.test(n))     return n.replace(/^(\d+)g$/i,   '$1-green');
+      if (/^\d+$/.test(n))       return n + '-blue';
+      return n;
+    }
+
+    // Sinflarni tartibga solish: raqam bo'yicha o'sish tartibida, tibbiyot har doim oxirida
+    const sortedSchoolData: Record<string, any[]> = {};
+    Object.entries(schoolData)
+      .map(([className, students]) => {
+        const formatted = formatClassName(className);
+        const isTib = /tibbiyot/i.test(formatted);
+        const num = parseInt(className.match(/\d+/)?.[0] ?? '999');
+        return { className, formatted, students, isTib, num };
+      })
+      .sort((a, b) => {
+        if (a.isTib !== b.isTib) return a.isTib ? 1 : -1; // tibbiyot oxirida
+        return a.num - b.num; // raqam bo'yicha o'sish
+      })
+      .forEach(({ formatted, students }) => {
+        sortedSchoolData[formatted] = students;
       });
 
-      if (percentColIndex === -1) return; // Topilmasa, bu varaqni tashlab ketamiz
+    console.log(`[ANALYZE] Topilgan sinflar (tartib): ${Object.keys(sortedSchoolData).join(', ')}`);
 
-      const students = [];
-      const rowCount = ws.rowCount;
-      for (let i = 2; i <= rowCount; i++) {
-        const row = ws.getRow(i);
-        let col1Value = row.getCell(1).value;
-        if (col1Value && typeof col1Value === 'object' && 'result' in col1Value) {
-            col1Value = col1Value.result;
-        }
-        const isNumber = col1Value !== null && col1Value !== undefined && String(col1Value).trim() !== '' && !isNaN(Number(col1Value));
-
-        if (isNumber) {
-           const fam = String(row.getCell(2).value || '').trim();
-           const ism = String(row.getCell(3).value || '').trim();
-           
-           let percentVal = row.getCell(percentColIndex).value;
-           if (percentVal && typeof percentVal === 'object' && 'result' in percentVal) {
-               percentVal = percentVal.result;
-           }
-           let percent = parseFloat(String(percentVal || '0'));
-
-           // FIX: Agar Excelda Umumiy % bo'm-bo'sh bo'lsa (0 yoki NaN bo'lsa),
-           // fanlardagi foizlar (subjectPercentCols) ni yig'ib o'rtachasini olamiz.
-           if (!percent || percent === 0 || isNaN(percent)) {
-               let sum = 0;
-               let count = 0;
-               for (const colNum of subjectPercentCols) {
-                   if (colNum === percentColIndex) continue;
-                   let val = row.getCell(colNum).value;
-                   if (val && typeof val === 'object' && 'result' in val) val = val.result;
-                   let p = parseFloat(String(val || '0'));
-                   if (!isNaN(p) && p > 0) {
-                       sum += p;
-                       count++;
-                   }
-               }
-               if (count > 0) {
-                   percent = parseFloat((sum / count).toFixed(1));
-               }
-           }
-
-           if (fam || ism) {
-             students.push({ ism_familiya: `${fam} ${ism}`.trim(), foiz: percent });
-           }
-        }
-      }
-
-      if (students.length > 0) {
-        schoolData[ws.name] = students;
-      }
-    });
-
-    console.log(`[ANALYZE] Topilgan sinflar: ${Object.keys(schoolData).join(', ')}`);
-
-    if (Object.keys(schoolData).length === 0) {
+    if (Object.keys(sortedSchoolData).length === 0) {
       throw new Error("Tahlil qilish uchun hech qanday o'quvchi ma'lumoti topilmadi. (Ehtimol '%' ustuni topilmagan)");
     }
 
     console.log("[ANALYZE] 3/4 - AI orqali tahlil qilinmoqda...");
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-    const prompt = `Har bir sinf uchun faqatgina quyidagilarni yozing:
-- Sinf nomi (Agar barcha o'quvchilarning natijasi 0% bo'lsa, faqatgina "Baholar kiritilmagan" deb yozing va o'quvchilarni chiqarmang).
-- 🥇 1-chi o'rinni olgan o'quvchilar (Agar bir xil eng yuqori natija bo'lsa, barchasini 1-o'rin sifatida yozing. 0% bo'lsa yozmang).
-- 2-chi o'rinni olgan o'quvchilar.
-- ‼️ 50% dan past olgan o'quvchilar (0% dan katta, lekin 50% dan kichik bo'lganlar. Natijasi 0% bo'lganlarni umuman ro'yxatga qo'shmang!).
+    const prompt = `Har bir sinf uchun quyidagilarni yozing:
 
+QOIDA: Agar sinf uchun berilgan ro'yxat bo'sh bo'lsa ([] yoki hech kim yo'q) — faqat sinf nomini va "Baholar kiritilmagan" deb yozing. O'rinlar ko'rsatmang.
 
-Hech qanday ortiqcha so'zlar, salomlashish yoki uzun gaplar yozmang. Faqat qisqa ro'yxat bo'lsin.
+Agar ro'yxatda o'quvchilar bor bo'lsa:
+- 🥇 1-o'rin: Eng yuqori foizli o'quvchi(lar)
+- 2-o'rin: Ikkinchi yuqori foizlilar
+- ‼️ 50% dan past: 0% dan yuqori lekin 50% dan past baholar
+
+Hech qanday ortiqcha so'zlar, salomlashish yoki izoh YOZMANG. Faqat qisqa ro'yxat.
 
 Ma'lumotlar:
-${JSON.stringify(schoolData, null, 2)}`;
+${JSON.stringify(sortedSchoolData, null, 2)}`;
 
 
     let aiText = '';
@@ -944,10 +1334,11 @@ ${JSON.stringify(schoolData, null, 2)}`;
       throw new Error("Hech qaysi AI modeli ishlamadi. API kalitingizni (Project access) tekshiring.");
     }
 
-    console.log("[ANALYZE] 4/5 - Rahbariyat guruhiga (CHANNEL_2) xabar yuborilmoqda...");
+     console.log("[ANALYZE] 4/5 - Rahbariyat guruhiga (CHANNEL_2) xabar yuborilmoqda...");
     await sendToTelegram(
       `📊 *Haftalik Imtihon Tahlili*\n\n${aiText}`,
-      managementChatId || undefined // CHANNEL_2 (rahbariyat guruhi)
+      managementChatId || undefined, // CHANNEL_2 (rahbariyat guruhi)
+      true // forceBot = true (always send via Telegram Bot)
     );
 
 
@@ -956,8 +1347,10 @@ ${JSON.stringify(schoolData, null, 2)}`;
     const msg = (error as Error).message;
     console.error("[ANALYZE] ❌ XATO:", msg);
     try {
-      await sendToTelegram(`❌ Tahlil xatosi:\n${msg}`, managementChatId || undefined);
+      await sendToTelegram(`❌ Tahlil xatosi:\n${msg}`, managementChatId || undefined, true);
     } catch (e) {}
+  } finally {
+    isAnalyzeRunning = false;
   }
 }
 
@@ -977,6 +1370,16 @@ app.post('/api/trigger', async (req, res) => {
   try {
     await runJob();
     res.json({ success: true, message: 'Ishga tushdi' });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Shanba: AI tahlilni qo'lda ishga tushirish
+app.post('/api/analyze', async (req, res) => {
+  try {
+    await analyzeJob();
+    res.json({ success: true, message: 'AI tahlil muvaffaqiyatli bajarildi' });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1194,12 +1597,143 @@ async function captureHtmlAsImage(htmlContent: string): Promise<Buffer> {
   }
 }
 
+async function captureSheetScreenshot(page: any, lastCol: number): Promise<Buffer | null> {
+  const iframeElement = await page.$('#pageswitcher-content');
+  if (!iframeElement) {
+    console.warn("captureSheetScreenshot: pageswitcher iframe not found");
+    return null;
+  }
+
+  const frame = await iframeElement.contentFrame();
+  if (!frame) {
+    console.warn("captureSheetScreenshot: contentFrame not accessible");
+    return null;
+  }
+
+  // Execute column hiding and calculate exact active rect inside the iframe
+  const clipRect = await frame.evaluate((limit) => {
+    const firstRow = document.querySelector('.waffle tr, table tr');
+    let hasRowHeaderShim = false;
+    if (firstRow) {
+      const firstCell = firstRow.children[0];
+      if (firstCell && (
+        firstCell.classList.contains('row-header-shim') || 
+        firstCell.classList.contains('row-headers-background') ||
+        firstCell.getAttribute('class')?.includes('shim')
+      )) {
+        hasRowHeaderShim = true;
+      }
+    }
+    
+    const colOffsetLimit = hasRowHeaderShim ? limit + 1 : limit;
+
+    // Hide unwanted columns
+    const rows = Array.from(document.querySelectorAll('.waffle tr, table tr'));
+    rows.forEach(row => {
+      let currentVisualCol = 0;
+      const cells = Array.from(row.children);
+      cells.forEach(cell => {
+        const colspan = parseInt(cell.getAttribute('colspan') || '1', 10);
+        if (currentVisualCol >= colOffsetLimit) {
+          (cell as HTMLElement).style.display = 'none';
+        } else if (currentVisualCol + colspan > colOffsetLimit) {
+          cell.setAttribute('colspan', String(colOffsetLimit - currentVisualCol));
+        }
+        currentVisualCol += colspan;
+      });
+    });
+
+    const colGroups = document.querySelectorAll('colgroup');
+    colGroups.forEach(cg => {
+      const cols = Array.from(cg.children);
+      for (let i = colOffsetLimit; i < cols.length; i++) {
+        (cols[i] as HTMLElement).style.display = 'none';
+      }
+    });
+
+    // Find the last populated row index
+    let lastPopulatedRow = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const cells = Array.from(rows[i].children);
+      const startCheckIdx = hasRowHeaderShim ? 1 : 0;
+      let hasContent = false;
+      for (let j = startCheckIdx; j < cells.length; j++) {
+        const cellText = (cells[j].textContent || '').trim().replace(/\u00a0/g, '');
+        if (cellText !== '') {
+          hasContent = true;
+          break;
+        }
+      }
+      if (hasContent) {
+        lastPopulatedRow = rows[i];
+        break;
+      }
+    }
+
+    const table = document.querySelector('.waffle, table') as HTMLElement;
+    if (!table || !lastPopulatedRow) return null;
+
+    const tableRect = table.getBoundingClientRect();
+    const lastRowRect = lastPopulatedRow.getBoundingClientRect();
+
+    // Find the rightmost edge of any visible cell to calculate precise width
+    let maxRight = tableRect.left;
+    const allCells = table.querySelectorAll('td, th');
+    allCells.forEach(cell => {
+      const htmlCell = cell as HTMLElement;
+      if (htmlCell.style.display !== 'none') {
+        const rect = htmlCell.getBoundingClientRect();
+        if (rect.right > maxRight && rect.width > 0) {
+          maxRight = rect.right;
+        }
+      }
+    });
+
+    return {
+      left: tableRect.left,
+      top: tableRect.top,
+      width: maxRight - tableRect.left,
+      height: lastRowRect.bottom - tableRect.top
+    };
+  }, lastCol);
+
+  if (!clipRect) {
+    console.warn("captureSheetScreenshot: Failed to calculate clip rect");
+    return null;
+  }
+
+  // Get iframe position on the main page
+  const iframeRect = await page.evaluate(() => {
+    const iframe = document.querySelector('#pageswitcher-content');
+    if (!iframe) return null;
+    const rect = iframe.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top
+    };
+  });
+
+  if (!iframeRect) {
+    console.warn("captureSheetScreenshot: Failed to get iframe rect");
+    return null;
+  }
+
+  // Calculate coordinates relative to the main viewport
+  const x = iframeRect.left + clipRect.left;
+  const y = iframeRect.top + clipRect.top;
+  const width = Math.ceil(clipRect.width);
+  const height = Math.ceil(clipRect.height);
+
+  return await page.screenshot({
+    type: 'png',
+    clip: { x, y, width, height }
+  }) as Buffer;
+}
+
 async function sendAllClassImages(sheets: string[]) {
   if (!constants.targetExcelLink) throw new Error("TARGET_EXCEL_LINK sozlanmagan.");
   const fileId = getFileIdFromLink(constants.targetExcelLink);
   if (!fileId) throw new Error("Excel ID topilmadi.");
-
-  const bot = new TelegramBot(constants.telegramBotToken, { polling: false });
 
   console.log("[ALL-IMAGES] Google Drive'dan Excel olinmoqda...");
   const oauth2Client = getOAuthClient();
@@ -1219,12 +1753,50 @@ async function sendAllClassImages(sheets: string[]) {
 
   console.log(`[ALL-IMAGES] Jami ${sheets.length} ta sinf yuboriladi...`);
 
+  // Telegram Userbot-ni ulashga urinib ko'ramiz
+  const userbot = await getUserbotClient();
+  let isUserbotConnected = false;
+  if (userbot) {
+    try {
+      console.log("[ALL-IMAGES] [USERBOT] Userbotga ulanilmoqda...");
+      await connectUserbot(userbot);
+      isUserbotConnected = true;
+      console.log("[ALL-IMAGES] [USERBOT] Userbot muvaffaqiyatli ulandi.");
+    } catch (err: any) {
+      console.error(`[ALL-IMAGES] [USERBOT] Ulanishda xato, BOT fallback ishlatiladi: ${err.message}`);
+    }
+  }
+
+  const bot = new TelegramBot(constants.telegramBotToken, { polling: false });
+
+  console.log("[ALL-IMAGES] [Puppeteer] Launching browser to capture Google Sheets preview...");
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 2200, height: 1200 });
+  
+  const previewUrl = `https://docs.google.com/spreadsheets/d/${fileId}/preview`;
+  console.log(`[ALL-IMAGES] [Puppeteer] Navigating to preview page: ${previewUrl}`);
+  try {
+    await page.goto(previewUrl, { waitUntil: 'networkidle2' });
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  } catch (err: any) {
+    console.error("[ALL-IMAGES] [Puppeteer] Preview sahifasiga ulanishda xato:", err.message);
+    await browser.close();
+    if (isUserbotConnected && userbot) {
+      try { await userbot.disconnect(); } catch {}
+    }
+    throw err;
+  }
+
   for (const sheetName of sheets) {
     const envKey = `TELEGRAM_CLASS_${sheetName}`;
-    const classChatId = (process.env[envKey] || '').trim();
+    const classChatId = (process.env[envKey] || process.env.TELEGRAM_CHANNEL_3 || '').trim();
 
     if (!classChatId) {
-      console.warn(`[ALL-IMAGES] ⚠️ ${sheetName}: ${envKey} .env da bo'sh. O'tkazib yuborildi.`);
+      console.warn(`[ALL-IMAGES] ⚠️ ${sheetName}: ${envKey} va TELEGRAM_CHANNEL_3 .env da bo'sh. O'tkazib yuborildi.`);
       skipped++;
       continue;
     }
@@ -1239,8 +1811,103 @@ async function sendAllClassImages(sheets: string[]) {
         continue;
       }
 
-      const htmlContent = generateSheetHtml(ws, sheetName);
-      const imgBuf = await captureHtmlAsImage(htmlContent);
+      console.log(`[ALL-IMAGES] [Puppeteer] "${sheetName}" varag'iga o'tilmoqda...`);
+      
+      // Get previous table HTML content to detect when the tab has loaded
+      const prevHash = await page.evaluate(() => {
+        const iframe = document.querySelector('#pageswitcher-content') as HTMLIFrameElement;
+        const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+        const table = doc?.querySelector('.waffle, table');
+        return table ? table.innerHTML.slice(0, 1000) : '';
+      });
+
+      const clicked = await page.evaluate((targetName) => {
+        const tabs = Array.from(document.querySelectorAll('.switcherItem, .switcherItemActive'));
+        const target = tabs.find(t => t.textContent?.trim() === targetName);
+        if (target) {
+          (target as HTMLElement).click();
+          return true;
+        }
+        return false;
+      }, sheetName);
+
+      if (!clicked) {
+        console.warn(`[ALL-IMAGES] [Puppeteer] ⚠️ "${sheetName}" varag'i topilmadi.`);
+        skipped++;
+        continue;
+      }
+
+      // Wait dynamically for the iframe content to load and render the new table
+      console.log(`[ALL-IMAGES] [Puppeteer] "${sheetName}" jadvali yuklanishi kutilmoqda...`);
+      let loaded = false;
+      for (let attempt = 0; attempt < 25; attempt++) {
+        const currentData = await page.evaluate((oldHash) => {
+          const iframe = document.querySelector('#pageswitcher-content') as HTMLIFrameElement;
+          const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+          const table = doc?.querySelector('.waffle, table');
+          if (!table) return { changed: false, empty: true };
+          const rows = doc.querySelectorAll('.waffle tr, table tr');
+          const currentHash = table.innerHTML.slice(0, 1000);
+          return {
+            changed: currentHash !== oldHash,
+            empty: rows.length <= 2
+          };
+        }, prevHash);
+
+        if (currentData.changed && !currentData.empty) {
+          loaded = true;
+          break;
+        }
+        await new Promise(res => setTimeout(res, 250));
+      }
+      console.log(`[ALL-IMAGES] [Puppeteer] "${sheetName}" yuklandi (Muvaffaqiyatli: ${loaded})`);
+
+      // Find the lastCol dynamically from the workbook
+      let lastCol = 22; // default fallback
+      if (ws) {
+        const row2 = ws.getRow(2);
+        const row3 = ws.getRow(3);
+        for (let c = 1; c <= ws.columnCount; c++) {
+          const val2 = String(row2.getCell(c).value || '').trim();
+          const val3 = String(row3.getCell(c).value || '').trim();
+          if (val2.includes('Umumiy') || val3.includes('Umumiy')) {
+            lastCol = c;
+            break;
+          }
+        }
+      }
+
+      let imgBuf: Buffer | null = null;
+      try {
+        imgBuf = await captureSheetScreenshot(page, lastCol);
+      } catch (err: any) {
+        console.warn(`[ALL-IMAGES] Precision crop screenshot failed for "${sheetName}": ${err.message}`);
+      }
+
+      if (!imgBuf) {
+        const iframeEl = await page.$('#pageswitcher-content');
+        if (iframeEl) {
+          try {
+            const frame = await iframeEl.contentFrame();
+            if (frame) {
+              const tableEl = await frame.$('.waffle, table');
+              if (tableEl) {
+                imgBuf = await tableEl.screenshot({ type: 'png' }) as Buffer;
+              }
+            }
+          } catch (err: any) {
+            console.warn(`[ALL-IMAGES] Fallback iframe table screenshot xatosi:`, err.message);
+          }
+          if (!imgBuf) {
+            try {
+              imgBuf = await iframeEl.screenshot({ type: 'png' }) as Buffer;
+            } catch (e) {}
+          }
+        }
+        if (!imgBuf) {
+          imgBuf = await page.screenshot({ type: 'png' }) as Buffer;
+        }
+      }
 
       const displayName = sheetName
         .replace(/(\d+)tibg$/, '$1-Tibbiyot (yashil)')
@@ -1249,14 +1916,51 @@ async function sendAllClassImages(sheets: string[]) {
         .replace(/(\d+)g$/, '$1-Green')
         .replace(/^(\d+)$/, '$1-Blue');
 
-      const caption = `Assalomu alaykum, hurmatli ota-onalar va aziz o'quvchilar!\n\n📊 ${displayName} sinfi — Haftalik imtihon natijalari\n\n✨ Agar natija yuqori bo'lsa — farzandingizni rag'batlantiring!\nAgar natija past bo'lsa — birga tahlil qiling va qo'llab-quvvatlang.\n\n🏫 Boborahim Mashrab nomli xususiy maktab`;
+      const caption = `Assalomu alaykum, hurmatli ota-onalar va aziz o‘quvchilar!
 
-      await bot.sendPhoto(classChatId, imgBuf, { caption }, { filename: `${sheetName}.png`, contentType: 'image/png' });
+📌 Haftalik imtihon natijalari bilan tanishing.
+Ushbu natijalarni tahlil qilishda quyidagilarga e’tibor qaratishingizni so‘raymiz:
+✨ Agar natija yuqori bo‘lsa — farzandingizni albatta rag‘batlantiring va maqtang! Sizning e’tirofingiz ularning keyingi imtihonlarda yanada ishonch bilan harakat qilishiga eng kuchli turtki bo‘ladi.
+Agar natija past bo‘lsa — tanqidga shoshilmang, aksincha, farzandingiz bilan birga past natijaning sabablarini tahlil qiling. Unga darslarda yanada faol bo‘lish, mavzularda tushunmagan savollarini o‘qituvchidan so‘rash va uyga berilgan topshiriqlarni to‘liq, o‘z vaqtida bajarish muvaffaqiyatning kaliti ekanligini tushuntiring. Sizning daldangiz va nazoratingiz farzandingizni ertangi g‘alabalarga yetaklovchi eng asosiy kuchdir. Sababi har bir bola mehnat, izlanish va ota-onaning qo‘llab-quvvatlashi orqali o‘z imkoniyatlarini namoyon eta oladi.
+
+🏫 Boborahim Mashrab nomli xususiy maktab — ta’lim va intizom istaganlar uchun`;
+
+      let sentWithUserbot = false;
+      if (isUserbotConnected && userbot) {
+        try {
+          const { CustomFile } = await import("telegram/client/uploads.js");
+          const toSend = new CustomFile(`${sheetName}.png`, imgBuf.length, "", imgBuf);
+          await userbot.sendFile(classChatId, {
+            file: toSend,
+            caption: caption
+          });
+          sentWithUserbot = true;
+          console.log(`[ALL-IMAGES] [USERBOT] ✅ ${sheetName} yuborildi → ${classChatId}`);
+        } catch (uErr: any) {
+          console.error(`[ALL-IMAGES] [USERBOT] ❌ ${sheetName} yuborishda xatolik: ${uErr.message}. Bot orqali yuborishga harakat qilinadi.`);
+        }
+      }
+
+      if (!sentWithUserbot) {
+        await bot.sendPhoto(classChatId, imgBuf, { caption }, { filename: `${sheetName}.png`, contentType: 'image/png' });
+        console.log(`[ALL-IMAGES] [BOT] ✅ ${sheetName} yuborildi → ${classChatId}`);
+      }
+
       sent++;
-      console.log(`[ALL-IMAGES] ✅ ${sheetName} (${sent}/${sheets.length - skipped}) yuborildi → ${classChatId}`);
     } catch (err: any) {
       failed++;
       console.error(`[ALL-IMAGES] ❌ ${sheetName} xato: ${err.message}`);
+    }
+  }
+
+  await browser.close().catch(() => {});
+
+  if (isUserbotConnected && userbot) {
+    try {
+      await userbot.disconnect();
+      console.log("[ALL-IMAGES] [USERBOT] Muvaffaqiyatli uzildi.");
+    } catch (err: any) {
+      console.error(`[ALL-IMAGES] [USERBOT] Disconnect xatosi: ${err.message}`);
     }
   }
 
@@ -1284,8 +1988,15 @@ app.post('/api/send-all-images', async (req, res) => {
 // 1-blue sinfining rasmini yuborish API (eskirgan — bir sinf uchun)
 app.post('/api/send-image', async (req, res) => {
   try {
-    const targetSheet = '1b';
-    const channel3 = (process.env.TELEGRAM_CHANNEL_3 || '').trim();
+    const targetSheet = (req.body.sheetName || req.query.sheetName || '1b').trim();
+    const envKey = `TELEGRAM_CLASS_${targetSheet}`;
+    const classChatId = (process.env[envKey] || process.env.TELEGRAM_CHANNEL_3 || '').trim();
+
+    console.log(`[SEND-IMAGE] targetSheet="${targetSheet}", envKey="${envKey}", classChatId="${classChatId}"`);
+
+    if (!classChatId) {
+      return res.status(400).json({ error: `TELEGRAM_CLASS_${targetSheet} yoki TELEGRAM_CHANNEL_3 .env da sozlanmagan.` });
+    }
 
     if (!constants.targetExcelLink) throw new Error("TARGET_EXCEL_LINK sozlanmagan.");
     const fileId = getFileIdFromLink(constants.targetExcelLink);
@@ -1347,11 +2058,110 @@ app.post('/api/send-image', async (req, res) => {
     });
 
     console.log("[SEND-IMAGE] 2/3 - Puppeteer orqali rasmga olinmoqda...");
-    const ws = wb.getWorksheet(targetSheet);
-    if (!ws) throw new Error(`Worksheet not found: ${targetSheet}`);
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 2200, height: 1200 });
+    const previewUrl = `https://docs.google.com/spreadsheets/d/${fileId}/preview`;
+    await page.goto(previewUrl, { waitUntil: 'networkidle2' });
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
-    const htmlContent = generateSheetHtml(ws, targetSheet);
-    const imageBuffer = await captureHtmlAsImage(htmlContent);
+    // Get previous table HTML content to detect when the tab has loaded
+    const prevHash = await page.evaluate(() => {
+      const iframe = document.querySelector('#pageswitcher-content') as HTMLIFrameElement;
+      const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+      const table = doc?.querySelector('.waffle, table');
+      return table ? table.innerHTML.slice(0, 1000) : '';
+    });
+
+    const clicked = await page.evaluate((targetName) => {
+      const tabs = Array.from(document.querySelectorAll('.switcherItem, .switcherItemActive'));
+      const target = tabs.find(t => t.textContent?.trim() === targetName);
+      if (target) {
+        (target as HTMLElement).click();
+        return true;
+      }
+      return false;
+    }, targetSheet);
+
+    if (!clicked) {
+      await browser.close();
+      throw new Error(`Tab "${targetSheet}" not found in preview page.`);
+    }
+
+    // Wait dynamically for the iframe content to load and render the new table
+    let loaded = false;
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const currentData = await page.evaluate((oldHash) => {
+        const iframe = document.querySelector('#pageswitcher-content') as HTMLIFrameElement;
+        const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+        const table = doc?.querySelector('.waffle, table');
+        if (!table) return { changed: false, empty: true };
+        const rows = doc.querySelectorAll('.waffle tr, table tr');
+        const currentHash = table.innerHTML.slice(0, 1000);
+        return {
+          changed: currentHash !== oldHash,
+          empty: rows.length <= 2
+        };
+      }, prevHash);
+
+      if (currentData.changed && !currentData.empty) {
+        loaded = true;
+        break;
+      }
+      await new Promise(res => setTimeout(res, 250));
+    }
+
+    // Find the lastCol dynamically from the workbook
+    const ws = wb.getWorksheet(targetSheet);
+    let lastCol = 22; // default fallback
+    if (ws) {
+      const row2 = ws.getRow(2);
+      const row3 = ws.getRow(3);
+      for (let c = 1; c <= ws.columnCount; c++) {
+        const val2 = String(row2.getCell(c).value || '').trim();
+        const val3 = String(row3.getCell(c).value || '').trim();
+        if (val2.includes('Umumiy') || val3.includes('Umumiy')) {
+          lastCol = c;
+          break;
+        }
+      }
+    }
+
+    let imageBuffer: Buffer | null = null;
+    try {
+      imageBuffer = await captureSheetScreenshot(page, lastCol);
+    } catch (err: any) {
+      console.warn(`[SEND-IMAGE] Precision crop screenshot failed for "${targetSheet}": ${err.message}`);
+    }
+
+    if (!imageBuffer) {
+      const iframeEl = await page.$('#pageswitcher-content');
+      if (iframeEl) {
+        try {
+          const frame = await iframeEl.contentFrame();
+          if (frame) {
+            const tableEl = await frame.$('.waffle, table');
+            if (tableEl) {
+              imageBuffer = await tableEl.screenshot({ type: 'png' }) as Buffer;
+            }
+          }
+        } catch (err: any) {
+          console.warn(`[SEND-IMAGE] Fallback iframe table screenshot xatosi:`, err.message);
+        }
+        if (!imageBuffer) {
+          try {
+            imageBuffer = await iframeEl.screenshot({ type: 'png' }) as Buffer;
+          } catch (e) {}
+        }
+      }
+      if (!imageBuffer) {
+        imageBuffer = await page.screenshot({ type: 'png' }) as Buffer;
+      }
+    }
+    await browser.close();
 
     console.log("[SEND-IMAGE] 3/3 - Rasm Telegramga yuborilmoqda...");
     const captionText = `Assalomu alaykum, hurmatli ota-onalar va aziz o‘quvchilar!
@@ -1366,7 +2176,7 @@ Agar natija past bo‘lsa — tanqidga shoshilmang, aksincha, farzandingiz bilan
     await sendPhotoToTelegram(
       imageBuffer, 
       captionText, 
-      channel3 || undefined
+      classChatId || undefined
     );
 
     res.json({ success: true, message: 'Rasm muvaffaqiyatli olinib, yuborildi!' });
@@ -1378,13 +2188,7 @@ Agar natija past bo‘lsa — tanqidga shoshilmang, aksincha, farzandingiz bilan
 
 
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
+  if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
@@ -1393,7 +2197,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`[API] Server running on http://localhost:${PORT}`);
   });
 }
 

@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch server.ts",
+    "predev": "node scripts/kill-ports.mjs",
+    "dev": "concurrently -k --names \"VITE,API\" --prefix-colors \"cyan,green\" \"vite\" \"tsx server.ts\"",
     "build": "vite build",
     "start": "node --experimental-strip-types server.ts",
     "preview": "vite preview",
@@ -31,6 +32,7 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "react-router-dom": "^7.14.2",
+    "telegram": "^2.26.22",
     "vite": "^6.2.3",
     "xlsx": "^0.18.5"
   },
@@ -39,6 +41,7 @@
     "@types/node": "^22.14.0",
     "@types/node-cron": "^3.0.11",
     "@types/node-telegram-bot-api": "^0.64.14",
+    "concurrently": "^10.0.3",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
