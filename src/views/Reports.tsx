@@ -23,13 +23,33 @@ export default function Reports() {
   const [twoFactorPassword, setTwoFactorPassword] = useState('');
   const [passwordRequired, setPasswordRequired] = useState(false);
 
+  const safeFetch = async (url: string, options?: RequestInit) => {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const text = await res.text();
+        console.error(`[API ERROR] ${url} returned status ${res.status}:`, text);
+        throw new Error(`Server status ${res.status}: ${text.slice(0, 300)}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error(`[API ERROR] Non-JSON response for ${url}:`, text);
+        throw new Error(`Non-JSON response: ${text.slice(0, 300)}`);
+      }
+      return await res.json();
+    } catch (err: any) {
+      console.error(`[API FETCH FAILED] ${url}:`, err.message || err);
+      throw err;
+    }
+  };
+
   const fetchConfig = () => {
-    fetch('/api/config').then(r => r.json()).then(setConfig).catch(console.error);
+    safeFetch('/api/config').then(setConfig).catch(console.error);
   };
 
   const fetchUserbotStatus = () => {
-    fetch('/api/userbot/status')
-      .then(r => r.json())
+    safeFetch('/api/userbot/status')
       .then(setUserbotStatus)
       .catch(console.error);
   };
@@ -57,14 +77,14 @@ export default function Reports() {
   const handleTrigger = async () => {
     setTriggering(true);
     try {
-      const d = await (await fetch('/api/trigger', { method: 'POST' })).json();
+      const d = await safeFetch('/api/trigger', { method: 'POST' });
       if (d.success) {
         showNotify("Muvaffaqiyatli bajarildi! Telegramni tekshiring.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
-    } catch { 
-      showNotify("So'rov yuborishda xatolik yuz berdi.", 'error'); 
+    } catch (err: any) { 
+      showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setTriggering(false); }
   };
@@ -72,14 +92,14 @@ export default function Reports() {
   const handleAnalyze = async () => {
     setAnalyzing(true);
     try {
-      const d = await (await fetch('/api/analyze', { method: 'POST' })).json();
+      const d = await safeFetch('/api/analyze', { method: 'POST' });
       if (d.success) {
         showNotify("AI Tahlil boshlandi! Telegram botga tez orada tahlil xabari boradi.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
-    } catch { 
-      showNotify("So'rov yuborishda xatolik yuz berdi.", 'error'); 
+    } catch (err: any) { 
+      showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setAnalyzing(false); }
   };
@@ -87,14 +107,14 @@ export default function Reports() {
   const handleSendAllImages = async () => {
     setSendingAllImages(true);
     try {
-      const d = await (await fetch('/api/send-all-images', { method: 'POST' })).json();
+      const d = await safeFetch('/api/send-all-images', { method: 'POST' });
       if (d.success) {
         showNotify("Barcha 24 sinf rasmlari yuborilmoqda! Server terminalini kuzating.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
-    } catch { 
-      showNotify("So'rov yuborishda xatolik yuz berdi.", 'error'); 
+    } catch (err: any) { 
+      showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setSendingAllImages(false); }
   };
@@ -116,20 +136,19 @@ export default function Reports() {
     }
     setUserbotLoading(true);
     try {
-      const res = await fetch('/api/userbot/connect', {
+      const data = await safeFetch('/api/userbot/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiId, apiHash, phoneNumber })
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      if (data.success) {
         showNotify(data.message, 'success');
         setUserbotStep(2);
       } else {
         showNotify(data.error || "Ulanishda xatolik yuz berdi.", 'error');
       }
-    } catch {
-      showNotify("Serverga ulanishda xatolik yuz berdi.", 'error');
+    } catch (err: any) {
+      showNotify("Serverga ulanishda xatolik yuz berdi: " + err.message, 'error');
     } finally {
       setUserbotLoading(false);
     }
@@ -143,31 +162,26 @@ export default function Reports() {
     }
     setUserbotLoading(true);
     try {
-      const res = await fetch('/api/userbot/verify', {
+      const data = await safeFetch('/api/userbot/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: smsCode, password: twoFactorPassword })
       });
-      const data = await res.json();
-      if (res.ok) {
-        if (data.success) {
-          showNotify(data.message, 'success');
-          setUserbotStep(1);
-          setSmsCode('');
-          setTwoFactorPassword('');
-          setPasswordRequired(false);
-          fetchUserbotStatus();
-        } else if (data.passwordRequired) {
-          showNotify(data.message, 'success');
-          setPasswordRequired(true);
-        } else {
-          showNotify(data.message || data.error || "Kod noto'g'ri.", 'error');
-        }
+      if (data.success) {
+        showNotify(data.message, 'success');
+        setUserbotStep(1);
+        setSmsCode('');
+        setTwoFactorPassword('');
+        setPasswordRequired(false);
+        fetchUserbotStatus();
+      } else if (data.passwordRequired) {
+        showNotify(data.message, 'success');
+        setPasswordRequired(true);
       } else {
-        showNotify(data.error || "Tasdiqlashda xatolik yuz berdi.", 'error');
+        showNotify(data.message || data.error || "Kod noto'g'ri.", 'error');
       }
-    } catch {
-      showNotify("Serverga ulanishda xatolik yuz berdi.", 'error');
+    } catch (err: any) {
+      showNotify("Serverga ulanishda xatolik yuz berdi: " + err.message, 'error');
     } finally {
       setUserbotLoading(false);
     }
@@ -177,16 +191,15 @@ export default function Reports() {
     if (!confirm("Haqiqatan ham Telegram profilingizni uzmoqchimisiz?")) return;
     setUserbotLoading(true);
     try {
-      const res = await fetch('/api/userbot/disconnect', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      const data = await safeFetch('/api/userbot/disconnect', { method: 'POST' });
+      if (data.success) {
         showNotify(data.message, 'success');
         fetchUserbotStatus();
       } else {
         showNotify(data.error || "Ulanishni uzishda xatolik yuz berdi.", 'error');
       }
-    } catch {
-      showNotify("Serverga ulanishda xatolik yuz berdi.", 'error');
+    } catch (err: any) {
+      showNotify("Serverga ulanishda xatolik yuz berdi: " + err.message, 'error');
     } finally {
       setUserbotLoading(false);
     }
