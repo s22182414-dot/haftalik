@@ -84,6 +84,20 @@ function getOAuthClient() {
   );
 }
 
+app.get('/api/debug-env', (req, res) => {
+  res.json({
+    GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+    GOOGLE_CLIENT_ID: !!process.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_ID_length: process.env.GOOGLE_CLIENT_ID ? process.env.GOOGLE_CLIENT_ID.length : 0,
+    GOOGLE_CLIENT_SECRET: !!process.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_CLIENT_SECRET_length: process.env.GOOGLE_CLIENT_SECRET ? process.env.GOOGLE_CLIENT_SECRET.length : 0,
+    TELEGRAM_BOT_TOKEN: !!process.env.TELEGRAM_BOT_TOKEN,
+    APP_URL: process.env.APP_URL || null,
+    NODE_ENV: process.env.NODE_ENV || null,
+    PORT: process.env.PORT || null
+  });
+});
+
 app.get('/api/auth/google', (req, res) => {
   const oauth2Client = getOAuthClient();
   const url = oauth2Client.generateAuthUrl({
