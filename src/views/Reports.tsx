@@ -127,6 +127,17 @@ export default function Reports() {
     window.open('/api/auth/google', 'google-auth', `width=${width},height=${height},left=${left},top=${top}`);
   };
 
+  const handleDisconnectGoogle = async () => {
+    if (!window.confirm("Google Drive ulanishini uzmoqchimisiz?")) return;
+    try {
+      await safeFetch('/api/auth/google/disconnect', { method: 'POST' });
+      showNotify("Google Drive ulanishi uzildi.", 'success');
+      fetchConfig();
+    } catch (err: any) {
+      showNotify("Uzishda xatolik: " + err.message, 'error');
+    }
+  };
+
   // Userbot handlers
   const handleUserbotConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -310,15 +321,24 @@ export default function Reports() {
               </p>
             </div>
 
-            <div>
+            <div className="flex flex-col gap-2">
               {config.googleConnected ? (
-                <button
-                  onClick={handleConnectGoogle}
-                  className="w-full flex items-center justify-center gap-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-800 py-3 px-4 rounded-xl text-sm font-medium transition-colors"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Qayta bog'lash (Hisobni almashtirish)
-                </button>
+                <>
+                  <button
+                    onClick={handleConnectGoogle}
+                    className="w-full flex items-center justify-center gap-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-800 py-3 px-4 rounded-xl text-sm font-medium transition-colors"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Qayta bog'lash (Hisobni almashtirish)
+                  </button>
+                  <button
+                    onClick={handleDisconnectGoogle}
+                    className="w-full flex items-center justify-center gap-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 py-2.5 px-4 rounded-xl text-sm font-medium transition-colors"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Ulanishni uzish
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={handleConnectGoogle}

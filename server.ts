@@ -109,13 +109,26 @@ app.get('/api/debug-env', (req, res) => {
   });
 });
 
-app.get('/api/auth/google', (req, res) => {
+app.get('/api/auth/google', async (req, res) => {
   const oauth2Client = getOAuthClient();
-  const url = oauth2Client.generateAuthUrl({
+  // Agar tokens.json mavjud bo'lsa va refresh_token bor bo'lsa — qayta login shart emas
+  // Faqat yangi ulanish kerak bo'lsa login oynasini ochamiz
+  let hasRefreshToken = false;
+  try {
+    const data = await fs.readFile(TOKENS_PATH, 'utf-8');
+    const saved = JSON.parse(data);
+    if (saved.refresh_token) hasRefreshToken = true;
+  } catch {}
+
+  const authOptions: any = {
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/drive'],
-    prompt: 'consent'
-  });
+  };
+  // Faqat refresh_token yo'q bo'lsa consent so'raymiz
+  if (!hasRefreshToken) {
+    authOptions.prompt = 'consent';
+  }
+  const url = oauth2Client.generateAuthUrl(authOptions);
   res.redirect(url);
 });
 
@@ -124,17 +137,35 @@ app.get('/api/auth/google/callback', async (req, res) => {
   const oauth2Client = getOAuthClient();
   try {
     const { tokens } = await oauth2Client.getToken(code as string);
-    await fs.writeFile(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+    // Agar yangi tokenda refresh_token yo'q bo'lsa — eskisini saqlaymiz
+    let finalTokens: any = { ...tokens };
+    if (!finalTokens.refresh_token) {
+      try {
+        const oldData = await fs.readFile(TOKENS_PATH, 'utf-8');
+        const oldTokens = JSON.parse(oldData);
+        if (oldTokens.refresh_token) {
+          finalTokens.refresh_token = oldTokens.refresh_token;
+        }
+      } catch {}
+    }
+    await fs.writeFile(TOKENS_PATH, JSON.stringify(finalTokens, null, 2));
     res.send(`
       <script>
-        window.opener.postMessage('google-auth-success', '*');
+        window.opener ? window.opener.postMessage('google-auth-success', '*') : null;
         window.close();
       </script>
-      <h1>Ulanmoqda...</h1>
+      <h1>Muvaffaqiyatli ulandi! Bu oynani yopishingiz mumkin.</h1>
     `);
   } catch (error) {
     res.status(500).send('Xatolik yuz berdi: ' + String(error));
   }
+});
+
+app.post('/api/auth/google/disconnect', async (req, res) => {
+  try {
+    await fs.unlink(TOKENS_PATH);
+  } catch {}
+  res.json({ success: true, message: "Google Drive ulanishi uzildi." });
 });// --- Database Logic ---
 const DB_FILE = path.join(process.cwd(), 'database.json');
 
@@ -370,8 +401,33 @@ app.post('/api/data/reset-gpa', async (req, res) => {
 app.get('/api/config', async (_req, res) => {
   let googleConnected = false;
   try {
-    await fs.access(TOKENS_PATH);
-    googleConnected = true;
+    const data = await fs.readFile(TOKENS_PATH, 'utf-8');
+    const savedTokens = JSON.parse(data);
+    // Token va refresh_token mavjudligini tekshiramiz
+    if (savedTokens && (savedTokens.refresh_token || savedTokens.access_token)) {
+      // Agar token muddati o'tgan bo'lsa, refresh qilamiz
+      const oauth2Client = getOAuthClient();
+      oauth2Client.setCredentials(savedTokens);
+      if (savedTokens.expiry_date && Date.now() > savedTokens.expiry_date - 60000) {
+        // Token muddati o'tgan yoki o'tay deb turibdi — refresh qilamiz
+        if (savedTokens.refresh_token) {
+          try {
+            const { credentials } = await oauth2Client.refreshAccessToken();
+            const updated = { ...savedTokens, ...credentials };
+            await fs.writeFile(TOKENS_PATH, JSON.stringify(updated, null, 2));
+            googleConnected = true;
+          } catch (refreshErr) {
+            console.error('[AUTH] Token refresh failed:', refreshErr);
+            // Refresh muvaffaqiyatsiz — qayta login kerak
+            googleConnected = false;
+          }
+        } else {
+          googleConnected = false;
+        }
+      } else {
+        googleConnected = true;
+      }
+    }
   } catch {}
 
   const chatIds = constants.telegramChatIds;
