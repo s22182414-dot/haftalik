@@ -85,6 +85,53 @@ function getOAuthClient() {
   );
 }
 
+// Tokenlarni o'qish: tokens.json, keyin database.json, keyin GOOGLE_REFRESH_TOKEN env var
+async function loadTokens(): Promise<any | null> {
+  // 1. tokens.json dan o'qib ko'ramiz
+  try {
+    const data = await fs.readFile(TOKENS_PATH, 'utf-8');
+    const t = JSON.parse(data);
+    if (t && (t.refresh_token || t.access_token)) return t;
+  } catch {}
+
+  // 2. database.json dan o'qib ko'ramiz (Render restart bo'lganda tokens.json yo'qoladi)
+  try {
+    const dbData = await fs.readFile(path.join(process.cwd(), 'database.json'), 'utf-8');
+    const db = JSON.parse(dbData);
+    if (db.googleTokens && (db.googleTokens.refresh_token || db.googleTokens.access_token)) {
+      // database.json dagi tokenlarni tokens.json ga ham yozib olamiz
+      await fs.writeFile(TOKENS_PATH, JSON.stringify(db.googleTokens, null, 2)).catch(() => {});
+      return db.googleTokens;
+    }
+  } catch {}
+
+  // 3. GOOGLE_REFRESH_TOKEN env var dan yaratamiz (Render environment variables)
+  if (process.env.GOOGLE_REFRESH_TOKEN) {
+    const tokens = {
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+      token_type: 'Bearer',
+      scope: 'https://www.googleapis.com/auth/drive'
+    };
+    await fs.writeFile(TOKENS_PATH, JSON.stringify(tokens, null, 2)).catch(() => {});
+    return tokens;
+  }
+
+  return null;
+}
+
+// Tokenlarni saqlash: tokens.json va database.json ga birga
+async function saveTokens(tokens: any): Promise<void> {
+  // tokens.json ga yoz
+  await fs.writeFile(TOKENS_PATH, JSON.stringify(tokens, null, 2)).catch(() => {});
+  // database.json ga ham yoz (Render restart bo'lganda saqlanib qolsin)
+  try {
+    const dbData = await fs.readFile(path.join(process.cwd(), 'database.json'), 'utf-8').catch(() => '{}');
+    const db = JSON.parse(dbData);
+    db.googleTokens = tokens;
+    await fs.writeFile(path.join(process.cwd(), 'database.json'), JSON.stringify(db, null, 2));
+  } catch {}
+}
+
 app.get('/api/debug-env', (req, res) => {
   const envKeys = Object.keys(process.env).filter(k => 
     k.includes('GOOGLE') || 
@@ -112,12 +159,10 @@ app.get('/api/debug-env', (req, res) => {
 app.get('/api/auth/google', async (req, res) => {
   const oauth2Client = getOAuthClient();
   // Agar tokens.json mavjud bo'lsa va refresh_token bor bo'lsa — qayta login shart emas
-  // Faqat yangi ulanish kerak bo'lsa login oynasini ochamiz
   let hasRefreshToken = false;
   try {
-    const data = await fs.readFile(TOKENS_PATH, 'utf-8');
-    const saved = JSON.parse(data);
-    if (saved.refresh_token) hasRefreshToken = true;
+    const saved = await loadTokens();
+    if (saved && saved.refresh_token) hasRefreshToken = true;
   } catch {}
 
   const authOptions: any = {
@@ -141,14 +186,13 @@ app.get('/api/auth/google/callback', async (req, res) => {
     let finalTokens: any = { ...tokens };
     if (!finalTokens.refresh_token) {
       try {
-        const oldData = await fs.readFile(TOKENS_PATH, 'utf-8');
-        const oldTokens = JSON.parse(oldData);
-        if (oldTokens.refresh_token) {
+        const oldTokens = await loadTokens();
+        if (oldTokens && oldTokens.refresh_token) {
           finalTokens.refresh_token = oldTokens.refresh_token;
         }
       } catch {}
     }
-    await fs.writeFile(TOKENS_PATH, JSON.stringify(finalTokens, null, 2));
+    await saveTokens(finalTokens);
     res.send(`
       <script>
         window.opener ? window.opener.postMessage('google-auth-success', '*') : null;
@@ -162,8 +206,13 @@ app.get('/api/auth/google/callback', async (req, res) => {
 });
 
 app.post('/api/auth/google/disconnect', async (req, res) => {
+  try { await fs.unlink(TOKENS_PATH); } catch {}
+  // database.json dan ham o'chiramiz
   try {
-    await fs.unlink(TOKENS_PATH);
+    const dbData = await fs.readFile(path.join(process.cwd(), 'database.json'), 'utf-8');
+    const db = JSON.parse(dbData);
+    delete db.googleTokens;
+    await fs.writeFile(path.join(process.cwd(), 'database.json'), JSON.stringify(db, null, 2));
   } catch {}
   res.json({ success: true, message: "Google Drive ulanishi uzildi." });
 });// --- Database Logic ---
@@ -401,8 +450,7 @@ app.post('/api/data/reset-gpa', async (req, res) => {
 app.get('/api/config', async (_req, res) => {
   let googleConnected = false;
   try {
-    const data = await fs.readFile(TOKENS_PATH, 'utf-8');
-    const savedTokens = JSON.parse(data);
+    const savedTokens = await loadTokens();
     // Token va refresh_token mavjudligini tekshiramiz
     if (savedTokens && (savedTokens.refresh_token || savedTokens.access_token)) {
       // Agar token muddati o'tgan bo'lsa, refresh qilamiz
@@ -414,11 +462,10 @@ app.get('/api/config', async (_req, res) => {
           try {
             const { credentials } = await oauth2Client.refreshAccessToken();
             const updated = { ...savedTokens, ...credentials };
-            await fs.writeFile(TOKENS_PATH, JSON.stringify(updated, null, 2));
+            await saveTokens(updated);
             googleConnected = true;
           } catch (refreshErr) {
             console.error('[AUTH] Token refresh failed:', refreshErr);
-            // Refresh muvaffaqiyatsiz — qayta login kerak
             googleConnected = false;
           }
         } else {
@@ -755,8 +802,9 @@ async function generateExcelData(): Promise<Record<string, any[]>> {
 async function uploadToDrive(buffer: Buffer, filename: string) {
   const oauth2Client = getOAuthClient();
   try {
-    const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-    oauth2Client.setCredentials(JSON.parse(tokens));
+    const tokens = await loadTokens();
+    if (!tokens) throw new Error('Token topilmadi');
+    oauth2Client.setCredentials(tokens);
   } catch (e) {
     throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
   }
@@ -1050,8 +1098,9 @@ async function runJob() {
     
     const oauth2Client = getOAuthClient();
     try {
-      const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-      oauth2Client.setCredentials(JSON.parse(tokens));
+      const tokens = await loadTokens();
+      if (!tokens) throw new Error('Token topilmadi');
+      oauth2Client.setCredentials(tokens);
     } catch (e) {
       throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
     }
@@ -1285,8 +1334,9 @@ async function analyzeJob() {
 
       const oauth2Client = getOAuthClient();
       try {
-        const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-        oauth2Client.setCredentials(JSON.parse(tokens));
+        const tokens = await loadTokens();
+        if (!tokens) throw new Error('Token topilmadi');
+        oauth2Client.setCredentials(tokens);
       } catch (e) {
         throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
       }
@@ -1819,8 +1869,9 @@ async function sendAllClassImages(sheets: string[]) {
 
   console.log("[ALL-IMAGES] Google Drive'dan Excel olinmoqda...");
   const oauth2Client = getOAuthClient();
-  const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-  oauth2Client.setCredentials(JSON.parse(tokens));
+  const tokens = await loadTokens();
+  if (!tokens) throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
+  oauth2Client.setCredentials(tokens);
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
   const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
@@ -2087,8 +2138,9 @@ app.post('/api/send-image', async (req, res) => {
 
     console.log("[SEND-IMAGE] 1/3 - Google Drive'dan Excel olinmoqda...");
     const oauth2Client = getOAuthClient();
-    const tokens = await fs.readFile(TOKENS_PATH, 'utf-8');
-    oauth2Client.setCredentials(JSON.parse(tokens));
+    const tokens = await loadTokens();
+    if (!tokens) throw new Error('Google hisobiga ulanmagansiz. Iltimos, avval ulaning.');
+    oauth2Client.setCredentials(tokens);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
     const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
