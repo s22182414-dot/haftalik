@@ -77,10 +77,11 @@ function getFileIdFromLink(link: string): string | null {
 const TOKENS_PATH = path.join(process.cwd(), 'tokens.json');
 
 function getOAuthClient() {
+  const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    `${process.env.APP_URL}/api/auth/google/callback`
+    `${appUrl}/api/auth/google/callback`
   );
 }
 
