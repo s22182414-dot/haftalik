@@ -25,6 +25,43 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 
 app.use(express.json());
 
+// ── Real-time Log Streaming (SSE) ────────────────────────────────────────────
+// Barcha ulangan brauzer clientlarini saqlash
+const logClients = new Set<any>();
+
+// Barcha consolellarni SSE orqali browserlarga ham yuborish (monkey-patch)
+const _origLog   = console.log.bind(console);
+const _origWarn  = console.warn.bind(console);
+const _origError = console.error.bind(console);
+
+function _sendToClients(level: 'info' | 'warn' | 'error', args: any[]) {
+  if (logClients.size === 0) return;
+  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  const data = JSON.stringify({ level, msg, ts: new Date().toISOString() });
+  for (const res of logClients) {
+    try { res.write(`data: ${data}\n\n`); } catch {}
+  }
+}
+
+console.log   = (...args: any[]) => { _origLog(...args);   _sendToClients('info',  args); };
+console.warn  = (...args: any[]) => { _origWarn(...args);  _sendToClients('warn',  args); };
+console.error = (...args: any[]) => { _origError(...args); _sendToClients('error', args); };
+
+// SSE endpoint — brauzer shu yerga ulanadi va real-time loglarni oladi
+app.get('/api/logs', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+  // Ulanish tasdig'i
+  const welcome = JSON.stringify({ level: 'info', msg: "🟢 Server log oqimi ulandi. Barcha amallar shu yerda ko'rinadi.", ts: new Date().toISOString() });
+  res.write(`data: ${welcome}\n\n`);
+  logClients.add(res);
+  req.on('close', () => logClients.delete(res));
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Excel varaqlari — rasmda ko'ringan haqiqiy nomlar
 const CLASS_SHEETS = [
   '1b',   '1g',   // 1-sinf

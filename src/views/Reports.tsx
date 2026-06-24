@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   FileSpreadsheet, Play, Database, Send, ShieldCheck, ArrowRight, 
   KeyRound, LogIn, UserCheck, UserX, Smartphone, Loader2, LogOut, 
-  Globe, RefreshCw, AlertCircle
+  Globe, RefreshCw, AlertCircle, Terminal, Trash2, Wifi, WifiOff
 } from 'lucide-react';
 
 export default function Reports() {
@@ -11,6 +11,13 @@ export default function Reports() {
   const [analyzing, setAnalyzing] = useState(false);
   const [sendingAllImages, setSendingAllImages] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | null }>({ message: '', type: null });
+
+  // Server log panel
+  type LogEntry = { level: 'info' | 'warn' | 'error'; msg: string; ts: string };
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logConnected, setLogConnected] = useState(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const sseRef = useRef<EventSource | null>(null);
 
   // Userbot State Variables
   const [userbotStatus, setUserbotStatus] = useState<{ connected: boolean; phoneNumber?: string; apiId?: string }>({ connected: false });
@@ -66,13 +73,34 @@ export default function Reports() {
       }
     };
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+
+    // SSE log oqimiga ulanish
+    const sse = new EventSource('/api/logs');
+    sseRef.current = sse;
+    sse.onopen = () => setLogConnected(true);
+    sse.onerror = () => setLogConnected(false);
+    sse.onmessage = (e) => {
+      try {
+        const entry: LogEntry = JSON.parse(e.data);
+        setLogs(prev => [...prev.slice(-499), entry]); // max 500 ta satr
+      } catch {}
+    };
+
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      sse.close();
+    };
   }, []);
 
   const showNotify = (message: string, type: 'success' | 'error') => {
     setNotification({ message, type });
     setTimeout(() => setNotification({ message: '', type: null }), 5000);
   };
+
+  // Auto-scroll log panel
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
   const handleTrigger = async () => {
     setTriggering(true);
@@ -289,6 +317,56 @@ export default function Reports() {
               {sendingAllImages ? "Yuborilmoqda..." : "Barcha sinflar (24 ta)"}
               <Send className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+
+        {/* Real-time Server Log Panel */}
+        <div className="mb-10 rounded-2xl overflow-hidden border border-zinc-800 shadow-lg">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 bg-zinc-900">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-zinc-400" />
+              <span className="text-sm font-mono font-medium text-zinc-300">Server Log</span>
+              <div className="flex items-center gap-1.5 ml-2">
+                {logConnected ? (
+                  <><Wifi className="w-3 h-3 text-emerald-400" />
+                  <span className="text-[11px] text-emerald-400 font-mono">ulandi</span></>
+                ) : (
+                  <><WifiOff className="w-3 h-3 text-zinc-500" />
+                  <span className="text-[11px] text-zinc-500 font-mono">uzildi</span></>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() => setLogs([])}
+              className="flex items-center gap-1.5 text-zinc-500 hover:text-zinc-300 transition-colors text-xs font-mono px-2 py-1 rounded hover:bg-zinc-800"
+            >
+              <Trash2 className="w-3 h-3" />
+              tozalash
+            </button>
+          </div>
+          {/* Log output */}
+          <div className="bg-[#0d1117] h-72 overflow-y-auto p-4 font-mono text-xs leading-relaxed">
+            {logs.length === 0 ? (
+              <div className="text-zinc-600 italic">Tugmalardan birini bosing — server loglari shu yerda ko'rinadi...</div>
+            ) : (
+              logs.map((entry, i) => {
+                const time = new Date(entry.ts).toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const color = entry.level === 'error' ? 'text-red-400' : entry.level === 'warn' ? 'text-yellow-300' : 'text-emerald-400';
+                const prefix = entry.level === 'error' ? '✗' : entry.level === 'warn' ? '⚠' : '›';
+                return (
+                  <div key={i} className="flex gap-2 mb-0.5 group">
+                    <span className="text-zinc-600 shrink-0 select-none">{time}</span>
+                    <span className={`${color} shrink-0`}>{prefix}</span>
+                    <span className={entry.level === 'error' ? 'text-red-300' : entry.level === 'warn' ? 'text-yellow-200' : 'text-zinc-200'}
+                      style={{ wordBreak: 'break-all' }}>
+                      {entry.msg}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+            <div ref={logEndRef} />
           </div>
         </div>
 
