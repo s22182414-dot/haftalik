@@ -85,6 +85,15 @@ function getOAuthClient() {
 }
 
 app.get('/api/debug-env', (req, res) => {
+  const envKeys = Object.keys(process.env).filter(k => 
+    k.includes('GOOGLE') || 
+    k.includes('TELEGRAM') || 
+    k.includes('BOT') || 
+    k.includes('KEY') || 
+    k.includes('CLIENT') || 
+    k.includes('APP') || 
+    k.includes('URL')
+  );
   res.json({
     GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
     GOOGLE_CLIENT_ID: !!process.env.GOOGLE_CLIENT_ID,
@@ -94,7 +103,8 @@ app.get('/api/debug-env', (req, res) => {
     TELEGRAM_BOT_TOKEN: !!process.env.TELEGRAM_BOT_TOKEN,
     APP_URL: process.env.APP_URL || null,
     NODE_ENV: process.env.NODE_ENV || null,
-    PORT: process.env.PORT || null
+    PORT: process.env.PORT || null,
+    all_matched_env_keys: envKeys
   });
 });
 
