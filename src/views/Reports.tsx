@@ -83,6 +83,15 @@ export default function Reports() {
       try {
         const entry: LogEntry = JSON.parse(e.data);
         setLogs(prev => [...prev.slice(-499), entry]); // max 500 ta satr
+        // Browser console-ga ham chiqarish
+        const prefix = `[Server ${entry.level.toUpperCase()}]`;
+        if (entry.level === 'error') {
+          console.error(prefix, entry.msg);
+        } else if (entry.level === 'warn') {
+          console.warn(prefix, entry.msg);
+        } else {
+          console.log(prefix, entry.msg);
+        }
       } catch {}
     };
 
@@ -103,45 +112,54 @@ export default function Reports() {
   }, [logs]);
 
   const handleTrigger = async () => {
+    console.log('[Reports] Triggering Juma: Tozalash...');
     setTriggering(true);
     try {
       const d = await safeFetch('/api/trigger', { method: 'POST' });
+      console.log('[Reports] Trigger response:', d);
       if (d.success) {
         showNotify("Muvaffaqiyatli bajarildi! Telegramni tekshiring.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
     } catch (err: any) { 
+      console.error('[Reports] Trigger request failed:', err);
       showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setTriggering(false); }
   };
 
   const handleAnalyze = async () => {
+    console.log('[Reports] Triggering Shanba: AI Tahlil...');
     setAnalyzing(true);
     try {
       const d = await safeFetch('/api/analyze', { method: 'POST' });
+      console.log('[Reports] AI Tahlil response:', d);
       if (d.success) {
         showNotify("AI Tahlil boshlandi! Telegram botga tez orada tahlil xabari boradi.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
     } catch (err: any) { 
+      console.error('[Reports] AI Tahlil request failed:', err);
       showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setAnalyzing(false); }
   };
 
   const handleSendAllImages = async () => {
+    console.log('[Reports] Triggering Barcha sinflar (24 ta)...');
     setSendingAllImages(true);
     try {
       const d = await safeFetch('/api/send-all-images', { method: 'POST' });
+      console.log('[Reports] Send all images response:', d);
       if (d.success) {
         showNotify("Barcha 24 sinf rasmlari yuborilmoqda! Server terminalini kuzating.", 'success');
       } else {
         showNotify("Xatolik: " + d.error, 'error');
       }
     } catch (err: any) { 
+      console.error('[Reports] Send all images request failed:', err);
       showNotify("So'rov yuborishda xatolik yuz berdi: " + err.message, 'error'); 
     }
     finally { setSendingAllImages(false); }
