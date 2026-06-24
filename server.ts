@@ -1607,6 +1607,7 @@ function generateSheetHtml(ws: any, sheetName: string): string {
 async function captureHtmlAsImage(htmlContent: string): Promise<Buffer> {
   const browser = await puppeteer.launch({
     headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none']
   });
   try {
@@ -1797,6 +1798,7 @@ async function sendAllClassImages(sheets: string[]) {
   console.log("[ALL-IMAGES] [Puppeteer] Launching browser to capture Google Sheets preview...");
   const browser = await puppeteer.launch({
     headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const page = await browser.newPage();
@@ -2085,6 +2087,7 @@ app.post('/api/send-image', async (req, res) => {
     console.log("[SEND-IMAGE] 2/3 - Puppeteer orqali rasmga olinmoqda...");
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();

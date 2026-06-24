@@ -39,11 +39,16 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     libnss3 \
     libxkbcommon0 \
+    chromium \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
+
+# Tell Puppeteer to skip downloading Chrome and use system Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Copy package files and install dependencies
 COPY package*.json ./
