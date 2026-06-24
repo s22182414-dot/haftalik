@@ -6,11 +6,12 @@
   "scripts": {
     "predev": "node scripts/kill-ports.mjs",
     "dev": "concurrently -k --names \"VITE,API\" --prefix-colors \"cyan,green\" \"vite\" \"tsx server.ts\"",
-    "build": "vite build",
+    "build": "vite build && npx puppeteer browsers install chrome",
     "start": "node --experimental-strip-types server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
