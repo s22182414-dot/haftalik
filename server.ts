@@ -28,6 +28,7 @@ app.use(express.json());
 // ── Real-time Log Streaming (SSE) ────────────────────────────────────────────
 // Barcha ulangan brauzer clientlarini saqlash
 const logClients = new Set<any>();
+const logBuffer: { level: string; msg: string; ts: string }[] = [];
 
 // Barcha consolellarni SSE orqali browserlarga ham yuborish (monkey-patch)
 const _origLog   = console.log.bind(console);
@@ -35,9 +36,15 @@ const _origWarn  = console.warn.bind(console);
 const _origError = console.error.bind(console);
 
 function _sendToClients(level: 'info' | 'warn' | 'error', args: any[]) {
-  if (logClients.size === 0) return;
   const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-  const data = JSON.stringify({ level, msg, ts: new Date().toISOString() });
+  const entry = { level, msg, ts: new Date().toISOString() };
+  
+  // Keep last 250 logs
+  logBuffer.push(entry);
+  if (logBuffer.length > 250) logBuffer.shift();
+
+  if (logClients.size === 0) return;
+  const data = JSON.stringify(entry);
   for (const res of logClients) {
     try { res.write(`data: ${data}\n\n`); } catch {}
   }
@@ -59,6 +66,11 @@ app.get('/api/logs', (req, res) => {
   res.write(`data: ${welcome}\n\n`);
   logClients.add(res);
   req.on('close', () => logClients.delete(res));
+});
+
+// Diagnostics endpoint to view logs
+app.get('/api/diagnostics/logs', (req, res) => {
+  res.json(logBuffer);
 });
 // ─────────────────────────────────────────────────────────────────────────────
 
