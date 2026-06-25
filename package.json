@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "postinstall": "node -e \"if(process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD!=='true'){require('child_process').execSync('npx puppeteer browsers install chrome',{stdio:'inherit'})}\""
+    "postinstall": "node -e \"process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD='false'; require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit'})\""
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
