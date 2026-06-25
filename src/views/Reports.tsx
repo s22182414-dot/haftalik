@@ -11,6 +11,7 @@ export default function Reports() {
   const [analyzing, setAnalyzing] = useState(false);
   const [sendingAllImages, setSendingAllImages] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | null }>({ message: '', type: null });
+  const [backendLoading, setBackendLoading] = useState(true);
 
   // Server log panel
   type LogEntry = { level: 'info' | 'warn' | 'error'; msg: string; ts: string };
@@ -51,20 +52,29 @@ export default function Reports() {
     }
   };
 
-  const fetchConfig = () => {
-    safeFetch('/api/config').then(setConfig).catch(console.error);
+  const fetchConfig = async () => {
+    try {
+      const data = await safeFetch('/api/config');
+      setConfig(data);
+      setBackendLoading(false);
+    } catch (err) {
+      console.error("Config yuklashda xato, qayta urinib ko'rilmoqda:", err);
+      setTimeout(fetchConfig, 3000);
+    }
   };
 
-  const fetchUserbotStatus = () => {
-    safeFetch('/api/userbot/status')
-      .then(setUserbotStatus)
-      .catch(console.error);
+  const fetchUserbotStatus = async () => {
+    try {
+      const data = await safeFetch('/api/userbot/status');
+      setUserbotStatus(data);
+    } catch (err) {
+      console.error("Userbot status yuklashda xato:", err);
+    }
   };
 
   useEffect(() => {
     fetchConfig();
-    fetchUserbotStatus();
-    
+
     // Listen for message from auth popup
     const handleMessage = (event: MessageEvent) => {
       if (event.data === 'google-auth-success') {
@@ -74,32 +84,51 @@ export default function Reports() {
     };
     window.addEventListener('message', handleMessage);
 
-    // SSE log oqimiga ulanish
-    const sse = new EventSource('/api/logs');
-    sseRef.current = sse;
-    sse.onopen = () => setLogConnected(true);
-    sse.onerror = () => setLogConnected(false);
-    sse.onmessage = (e) => {
-      try {
-        const entry: LogEntry = JSON.parse(e.data);
-        setLogs(prev => [...prev.slice(-499), entry]); // max 500 ta satr
-        // Browser console-ga ham chiqarish
-        const prefix = `[Server ${entry.level.toUpperCase()}]`;
-        if (entry.level === 'error') {
-          console.error(prefix, entry.msg);
-        } else if (entry.level === 'warn') {
-          console.warn(prefix, entry.msg);
-        } else {
-          console.log(prefix, entry.msg);
-        }
-      } catch {}
-    };
-
     return () => {
       window.removeEventListener('message', handleMessage);
-      sse.close();
     };
   }, []);
+
+  useEffect(() => {
+    let sse: EventSource | null = null;
+    let interval: any = null;
+
+    if (!backendLoading) {
+      fetchUserbotStatus();
+
+      // SSE log oqimiga ulanish
+      sse = new EventSource('/api/logs');
+      sseRef.current = sse;
+      sse.onopen = () => setLogConnected(true);
+      sse.onerror = () => setLogConnected(false);
+      sse.onmessage = (e) => {
+        try {
+          const entry: LogEntry = JSON.parse(e.data);
+          setLogs(prev => [...prev.slice(-499), entry]); // max 500 ta satr
+          // Browser console-ga ham chiqarish
+          const prefix = `[Server ${entry.level.toUpperCase()}]`;
+          if (entry.level === 'error') {
+            console.error(prefix, entry.msg);
+          } else if (entry.level === 'warn') {
+            console.warn(prefix, entry.msg);
+          } else {
+            console.log(prefix, entry.msg);
+          }
+        } catch {}
+      };
+
+      // Serverni uxlab qolishdan saqlash uchun har 10 daqiqada ping (keep-alive)
+      interval = setInterval(() => {
+        console.log("[Keep-Alive] Serverni uyg'oq saqlash uchun ping yuborilmoqda...");
+        safeFetch('/api/config').catch(() => {});
+      }, 10 * 60 * 1000);
+    }
+
+    return () => {
+      if (sse) sse.close();
+      if (interval) clearInterval(interval);
+    };
+  }, [backendLoading]);
 
   const showNotify = (message: string, type: 'success' | 'error') => {
     setNotification({ message, type });
@@ -261,6 +290,35 @@ export default function Reports() {
       setUserbotLoading(false);
     }
   };
+
+  if (backendLoading) {
+    return (
+      <div className="fixed inset-0 bg-[#0d1117]/90 backdrop-blur-md flex flex-col items-center justify-center z-50 p-6 text-center animate-in fade-in duration-300">
+        <div className="max-w-md w-full bg-[#161b22] border border-zinc-800 rounded-3xl p-8 shadow-2xl flex flex-col items-center gap-6">
+          <div className="relative">
+            <div className="w-16 h-16 border-4 border-zinc-850 border-t-emerald-500 rounded-full animate-spin" />
+            <Terminal className="w-6 h-6 text-zinc-400 absolute inset-0 m-auto animate-pulse" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-white mb-2 font-mono">Server uygonyapti...</h3>
+            <p className="text-zinc-400 text-xs leading-relaxed font-sans mb-4">
+              Render bepul serveri 15 daqiqa davomida ishlatilmagani uchun avtomatik uxlab qolgan. Hozir u qayta ishga tushmoqda, bu taxminan 30-50 soniya vaqt oladi.
+            </p>
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-3 text-left">
+              <span className="text-[10px] font-mono text-amber-500 uppercase font-bold block mb-1">💡 Foydali maslahat</span>
+              <p className="text-zinc-550 text-[11px] leading-normal font-sans">
+                Server umuman uxlab qolmasligi va bir zumda yuklanishi uchun <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-emerald-400 underline hover:text-emerald-300">uptimerobot.com</a> yoki <a href="https://cron-job.org" target="_blank" rel="noreferrer" className="text-emerald-400 underline hover:text-emerald-300">cron-job.org</a> orqali <code>https://haftalikd.onrender.com/api/config</code> manzilini har 10 daqiqada tekshiradigan bepul ping sozlab qo'yishingiz mumkin.
+              </p>
+            </div>
+          </div>
+          <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+            <div className="bg-emerald-500 h-full rounded-full animate-loading-progress" />
+          </div>
+          <p className="text-zinc-500 text-[10px] font-mono tracking-widest uppercase animate-pulse">Iltimos, kutib turing...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="animate-in fade-in zoom-in-95 duration-300 relative">
