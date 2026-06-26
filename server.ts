@@ -271,6 +271,19 @@ app.post('/api/auth/google/disconnect', async (req, res) => {
   res.json({ success: true, message: "Google Drive ulanishi uzildi." });
 });
 
+app.post('/api/auth/google/restore', async (req, res) => {
+  const { tokens } = req.body;
+  if (!tokens) {
+    return res.status(400).json({ error: "Tokenlar yuborilmadi." });
+  }
+  try {
+    await saveTokens(tokens);
+    res.json({ success: true, message: "Google Drive ulanishi tiklandi." });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // Refresh tokenni ko'rish uchun (Render env var ga qo'shish)
 app.get('/api/auth/google/token-info', async (req, res) => {
   try {
@@ -351,7 +364,8 @@ app.get('/api/userbot/status', async (req, res) => {
       return res.json({
         connected: true,
         phoneNumber: db.userbotSession.phoneNumber,
-        apiId: db.userbotSession.apiId
+        apiId: db.userbotSession.apiId,
+        session: db.userbotSession
       });
     }
     return res.json({ connected: false });
@@ -448,12 +462,13 @@ app.post('/api/userbot/verify', async (req, res) => {
     const sessionStr = tempTelegramClient.session.save() as string;
     
     const db = await readDB();
-    db.userbotSession = {
+    const sessionData = {
       apiId: tempApiId,
       apiHash: tempApiHash,
       phoneNumber: tempPhoneNumber,
       sessionStr: sessionStr
     };
+    db.userbotSession = sessionData;
     await writeDB(db);
 
     console.log(`[USERBOT] Muvaffaqiyatli ulandi!`);
@@ -464,7 +479,7 @@ app.post('/api/userbot/verify', async (req, res) => {
     tempApiId = 0;
     tempApiHash = "";
 
-    res.json({ success: true, message: "Telegram profilingiz muvaffaqiyatli ulandi!" });
+    res.json({ success: true, message: "Telegram profilingiz muvaffaqiyatli ulandi!", session: sessionData });
   } catch (error: any) {
     console.error(`[USERBOT] Kod tasdiqlashda xato:`, error.message);
     res.status(500).json({ error: error.message || String(error) });
@@ -486,6 +501,21 @@ app.post('/api/userbot/disconnect', async (req, res) => {
       await writeDB(db);
     }
     res.json({ success: true, message: "Ulanish uzildi." });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/userbot/restore', async (req, res) => {
+  const { session } = req.body;
+  if (!session) {
+    return res.status(400).json({ error: "Sessiya yuborilmadi." });
+  }
+  try {
+    const db = await readDB();
+    db.userbotSession = session;
+    await writeDB(db);
+    res.json({ success: true, message: "Telegram userbot ulanishi tiklandi." });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -521,6 +551,7 @@ app.post('/api/data/reset-gpa', async (req, res) => {
 
 app.get('/api/config', async (_req, res) => {
   let googleConnected = false;
+  let googleTokens: any = null;
   try {
     const savedTokens = await loadTokens();
     // Token va refresh_token mavjudligini tekshiramiz
@@ -536,6 +567,7 @@ app.get('/api/config', async (_req, res) => {
             const updated = { ...savedTokens, ...credentials };
             await saveTokens(updated);
             googleConnected = true;
+            googleTokens = updated;
           } catch (refreshErr) {
             console.error('[AUTH] Token refresh failed:', refreshErr);
             googleConnected = false;
@@ -545,6 +577,7 @@ app.get('/api/config', async (_req, res) => {
         }
       } else {
         googleConnected = true;
+        googleTokens = savedTokens;
       }
     }
   } catch {}
@@ -554,6 +587,7 @@ app.get('/api/config', async (_req, res) => {
     isTelegramConfigured: !!constants.telegramBotToken && chatIds.length > 0,
     telegramChannelCount: chatIds.length,
     googleConnected,
+    googleTokens,
     authMode: 'oauth2'
   });
 });

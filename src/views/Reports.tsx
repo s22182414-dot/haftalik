@@ -57,6 +57,32 @@ export default function Reports() {
       const data = await safeFetch('/api/config');
       setConfig(data);
       setBackendLoading(false);
+
+      // LocalStorage sync for Google Drive tokens
+      if (data.googleConnected && data.googleTokens) {
+        localStorage.setItem('googleTokens', JSON.stringify(data.googleTokens));
+      } else if (!data.googleConnected) {
+        const stored = localStorage.getItem('googleTokens');
+        if (stored) {
+          try {
+            const tokens = JSON.parse(stored);
+            console.log("[AUTH] localstorage dan Google tokenlarni tiklashga urinilmoqda...");
+            const restoreRes = await safeFetch('/api/auth/google/restore', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tokens })
+            });
+            if (restoreRes.success) {
+              console.log("[AUTH] Google tokenlar muvaffaqiyatli tiklandi!");
+              // Re-fetch config with restored tokens
+              const updatedData = await safeFetch('/api/config');
+              setConfig(updatedData);
+            }
+          } catch (e) {
+            console.error("[AUTH] Google tokenlarni tiklashda xato:", e);
+          }
+        }
+      }
     } catch (err) {
       console.error("Config yuklashda xato, qayta urinib ko'rilmoqda:", err);
       setTimeout(fetchConfig, 3000);
@@ -67,6 +93,32 @@ export default function Reports() {
     try {
       const data = await safeFetch('/api/userbot/status');
       setUserbotStatus(data);
+
+      // LocalStorage sync for Userbot session
+      if (data.connected && data.session) {
+        localStorage.setItem('userbotSession', JSON.stringify(data.session));
+      } else if (!data.connected) {
+        const stored = localStorage.getItem('userbotSession');
+        if (stored) {
+          try {
+            const session = JSON.parse(stored);
+            console.log("[USERBOT] localstorage dan Userbot sessiyasini tiklashga urinilmoqda...");
+            const restoreRes = await safeFetch('/api/userbot/restore', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ session })
+            });
+            if (restoreRes.success) {
+              console.log("[USERBOT] Userbot sessiyasi muvaffaqiyatli tiklandi!");
+              // Re-fetch status with restored session
+              const updatedData = await safeFetch('/api/userbot/status');
+              setUserbotStatus(updatedData);
+            }
+          } catch (e) {
+            console.error("[USERBOT] Userbot sessiyasini tiklashda xato:", e);
+          }
+        }
+      }
     } catch (err) {
       console.error("Userbot status yuklashda xato:", err);
     }
@@ -223,6 +275,7 @@ export default function Reports() {
   const handleDisconnectGoogle = async () => {
     if (!window.confirm("Google Drive ulanishini uzmoqchimisiz?")) return;
     try {
+      localStorage.removeItem('googleTokens');
       await safeFetch('/api/auth/google/disconnect', { method: 'POST' });
       showNotify("Google Drive ulanishi uzildi.", 'success');
       fetchConfig();
@@ -272,6 +325,9 @@ export default function Reports() {
         body: JSON.stringify({ code: smsCode, password: twoFactorPassword })
       });
       if (data.success) {
+        if (data.session) {
+          localStorage.setItem('userbotSession', JSON.stringify(data.session));
+        }
         showNotify(data.message, 'success');
         setUserbotStep(1);
         setSmsCode('');
@@ -297,6 +353,7 @@ export default function Reports() {
     try {
       const data = await safeFetch('/api/userbot/disconnect', { method: 'POST' });
       if (data.success) {
+        localStorage.removeItem('userbotSession');
         showNotify(data.message, 'success');
         fetchUserbotStatus();
       } else {
