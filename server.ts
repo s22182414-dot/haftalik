@@ -1819,17 +1819,32 @@ function generateSheetHtml(ws: any, sheetName: string): string {
 async function captureHtmlAsImage(htmlContent: string): Promise<Buffer> {
   const browser = await puppeteer.launch({
     headless: true,
+    protocolTimeout: 180000,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--font-render-hinting=none'
+      '--font-render-hinting=none',
+      '--disable-extensions',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-default-apps',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--no-first-run',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      '--js-flags=--max-old-space-size=128'
     ]
   });
   try {
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(90000);
+    page.setDefaultTimeout(90000);
     await page.setViewport({ width: 1300, height: 900, deviceScaleFactor: 2 });
     await page.setContent(htmlContent, { waitUntil: 'load' });
     const element = await page.$('#capture-target');
@@ -2017,15 +2032,30 @@ async function sendAllClassImages(sheets: string[]) {
   console.log("[ALL-IMAGES] [Puppeteer] Launching browser to capture Google Sheets preview...");
   const browser = await puppeteer.launch({
     headless: true,
+    protocolTimeout: 180000,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-default-apps',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--no-first-run',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      '--js-flags=--max-old-space-size=128'
     ]
   });
   const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(90000);
   await page.setViewport({ width: 2200, height: 1200 });
   
   const previewUrl = `https://docs.google.com/spreadsheets/d/${fileId}/preview`;
@@ -2312,15 +2342,30 @@ app.post('/api/send-image', async (req, res) => {
     console.log("[SEND-IMAGE] 2/3 - Puppeteer orqali rasmga olinmoqda...");
     const browser = await puppeteer.launch({
       headless: true,
+      protocolTimeout: 180000,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--disable-default-apps',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--no-first-run',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--js-flags=--max-old-space-size=128'
       ]
     });
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(90000);
+    page.setDefaultTimeout(90000);
     await page.setViewport({ width: 2200, height: 1200 });
     const previewUrl = `https://docs.google.com/spreadsheets/d/${fileId}/preview`;
     await page.goto(previewUrl, { waitUntil: 'networkidle2' });
