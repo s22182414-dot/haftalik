@@ -179,6 +179,11 @@ async function saveTokens(tokens: any): Promise<void> {
     db.googleTokens = tokens;
     await fs.writeFile(path.join(process.cwd(), 'database.json'), JSON.stringify(db, null, 2));
   } catch {}
+  // refresh_token ni loglarga chiqaramiz — Render env var ga qo'shish uchun
+  if (tokens.refresh_token) {
+    console.log(`[AUTH] ✅ Google ulandi! refresh_token: ${tokens.refresh_token}`);
+    console.log(`[AUTH] 📋 Render Environment Variables ga qo'shing: GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}`);
+  }
 }
 
 app.get('/api/debug-env', (req, res) => {
@@ -264,6 +269,24 @@ app.post('/api/auth/google/disconnect', async (req, res) => {
     await fs.writeFile(path.join(process.cwd(), 'database.json'), JSON.stringify(db, null, 2));
   } catch {}
   res.json({ success: true, message: "Google Drive ulanishi uzildi." });
+});
+
+// Refresh tokenni ko'rish uchun (Render env var ga qo'shish)
+app.get('/api/auth/google/token-info', async (req, res) => {
+  try {
+    const tokens = await loadTokens();
+    if (!tokens) return res.json({ connected: false, refresh_token: null });
+    res.json({
+      connected: !!(tokens.refresh_token || tokens.access_token),
+      has_refresh_token: !!tokens.refresh_token,
+      refresh_token: tokens.refresh_token || null,
+      hint: tokens.refresh_token
+        ? `Render > Environment Variables ga qo'shing: GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}`
+        : 'Avval Google hisobini ulang'
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });// --- Database Logic ---
 const DB_FILE = path.join(process.cwd(), 'database.json');
 
