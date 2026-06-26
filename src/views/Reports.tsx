@@ -97,6 +97,7 @@ export default function Reports() {
     let sse: EventSource | null = null;
     let reconnectTimer: any = null;
     let destroyed = false;
+    let retryDelay = 3000; // boshlang'ich: 3 soniya
 
     const connectSSE = () => {
       if (destroyed) return;
@@ -105,16 +106,18 @@ export default function Reports() {
 
       sse.onopen = () => {
         setLogConnected(true);
+        retryDelay = 3000; // muvaffaqiyatli ulanganda — qayta boshlash
         console.log('[SSE] Server log oqimiga ulandi.');
       };
 
       sse.onerror = () => {
         setLogConnected(false);
         sse?.close();
-        // 3 soniyadan keyin qayta ulanish
         if (!destroyed) {
-          console.warn('[SSE] Ulanish uzildi. 3 soniyadan keyin qayta urinib ko\'riladi...');
-          reconnectTimer = setTimeout(connectSSE, 3000);
+          console.warn(`[SSE] Ulanish uzildi. ${retryDelay / 1000}s dan keyin qayta uriniladi...`);
+          reconnectTimer = setTimeout(connectSSE, retryDelay);
+          // Exponential backoff: har safar ikki baravar, max 30 soniya
+          retryDelay = Math.min(retryDelay * 2, 30000);
         }
       };
 
