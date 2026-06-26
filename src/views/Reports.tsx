@@ -90,43 +90,58 @@ export default function Reports() {
   }, []);
 
   useEffect(() => {
+    if (backendLoading) return;
+
+    fetchUserbotStatus();
+
     let sse: EventSource | null = null;
-    let interval: any = null;
+    let reconnectTimer: any = null;
+    let destroyed = false;
 
-    if (!backendLoading) {
-      fetchUserbotStatus();
-
-      // SSE log oqimiga ulanish
+    const connectSSE = () => {
+      if (destroyed) return;
       sse = new EventSource('/api/logs');
       sseRef.current = sse;
-      sse.onopen = () => setLogConnected(true);
-      sse.onerror = () => setLogConnected(false);
+
+      sse.onopen = () => {
+        setLogConnected(true);
+        console.log('[SSE] Server log oqimiga ulandi.');
+      };
+
+      sse.onerror = () => {
+        setLogConnected(false);
+        sse?.close();
+        // 3 soniyadan keyin qayta ulanish
+        if (!destroyed) {
+          console.warn('[SSE] Ulanish uzildi. 3 soniyadan keyin qayta urinib ko\'riladi...');
+          reconnectTimer = setTimeout(connectSSE, 3000);
+        }
+      };
+
       sse.onmessage = (e) => {
         try {
           const entry: LogEntry = JSON.parse(e.data);
-          setLogs(prev => [...prev.slice(-499), entry]); // max 500 ta satr
-          // Browser console-ga ham chiqarish
+          setLogs(prev => [...prev.slice(-499), entry]);
           const prefix = `[Server ${entry.level.toUpperCase()}]`;
-          if (entry.level === 'error') {
-            console.error(prefix, entry.msg);
-          } else if (entry.level === 'warn') {
-            console.warn(prefix, entry.msg);
-          } else {
-            console.log(prefix, entry.msg);
-          }
+          if (entry.level === 'error') console.error(prefix, entry.msg);
+          else if (entry.level === 'warn') console.warn(prefix, entry.msg);
+          else console.log(prefix, entry.msg);
         } catch {}
       };
+    };
 
-      // Serverni uxlab qolishdan saqlash uchun har 10 daqiqada ping (keep-alive)
-      interval = setInterval(() => {
-        console.log("[Keep-Alive] Serverni uyg'oq saqlash uchun ping yuborilmoqda...");
-        safeFetch('/api/config').catch(() => {});
-      }, 10 * 60 * 1000);
-    }
+    connectSSE();
+
+    // Serverni uxlab qolishdan saqlash uchun har 10 daqiqada ping
+    const interval = setInterval(() => {
+      safeFetch('/api/config').catch(() => {});
+    }, 10 * 60 * 1000);
 
     return () => {
+      destroyed = true;
+      clearTimeout(reconnectTimer);
+      clearInterval(interval);
       if (sse) sse.close();
-      if (interval) clearInterval(interval);
     };
   }, [backendLoading]);
 
