@@ -48,11 +48,12 @@ WORKDIR /app
 
 # Tell Puppeteer to skip downloading Chrome and use system Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Copy package files and install dependencies
+# Copy package files and install dependencies (--ignore-scripts skips postinstall Chrome download)
 COPY package*.json ./
-RUN npm install
+RUN npm install --ignore-scripts
 
 # Copy application files
 COPY . .
